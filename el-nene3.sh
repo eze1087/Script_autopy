@@ -4,33 +4,28 @@ set -euo pipefail
 # ==========================================================
 #  El NeNe 3.0 – Redireccionamiento de Puertos
 #
-#  ✅ systemd + screen (como manual)
-#  ✅ FIX timeout: Type=oneshot + RemainAfterExit=yes + ExecStop
-#  ✅ NO pregunta puertos de PDirect/proxy (se editan en el .py)
-#  ✅ BadVPN: 7300 por defecto (editable desde menú)
-#  ✅ Descarga assets desde GitHub raw (files/)
-#  ✅ Estado guardado: /var/lib/nene3/target.conf
-#  ✅ Comandos instalados: pdmenu y automenu
-#  ✅ Firewall UFW (permitir puertos)
-#  ✅ Autostart enable/disable (arranque al reinicio)
-#  ✅ STATUS REAL: detecta screen + puertos LISTEN (netstat/ss)
-#  ✅ Vuelve al menú tras cada acción (ENTER)
+#  ✅ RUTAS EXACTAS (service = ruta = copia) + mkdir -p
+#  ✅ systemd + screen (como manual) + FIX timeout (oneshot)
+#  ✅ BadVPN 7300 default (editable)
+#  ✅ Descarga assets desde GitHub (/files)
+#  ✅ Guarda estado /var/lib/nene3/target.conf
+#  ✅ Comandos: pdmenu / automenu
+#  ✅ Firewall UFW / Autostart enable-disable
+#  ✅ STATUS REAL: screen + LISTEN (netstat/ss)
+#  ✅ NUEVO: opción menú para editar PDirect.py y proxy.py (nano)
 # ==========================================================
 
 APP_NAME="El NeNe 3.0 – Redireccionamiento de Puertos"
 
-# stdin por pipe => usar teclado real
 if [[ ! -t 0 ]] && [[ -r /dev/tty ]]; then
   exec </dev/tty
 fi
 
-# ==== TU REPO ====
 GITHUB_USER="eze1087"
 GITHUB_REPO="Script_autopy"
 GITHUB_BRANCH="main"
 RAW_BASE="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
-# Assets en repo (/files)
 PD_FILE="PDirect.py"
 PX_FILE="proxy.py"
 BAD_FILE="badvpn-udpgw"
@@ -41,7 +36,6 @@ SYSTEMD_DIR="/etc/systemd/system"
 PD_SVC="pdirect.service"
 PX_SVC="proxy.service"
 
-# BadVPN
 BAD_SVC="badvpn-udpgw.service"
 BAD_BIN="/bin/badvpn-udpgw"
 BAD_WRAPPER="/bin/antcrashvpn.sh"
@@ -54,7 +48,6 @@ STATE_FILE="${STATE_DIR}/target.conf"
 CMD1="/usr/local/bin/pdmenu"
 CMD2="/usr/local/bin/automenu"
 
-# -------- helpers --------
 ts(){ date +"%Y%m%d%H%M%S"; }
 die(){ echo "❌ $*"; exit 1; }
 ok(){ echo "✅ $*"; }
@@ -62,7 +55,6 @@ warn(){ echo "⚠️  $*"; }
 has_cmd(){ command -v "$1" >/dev/null 2>&1; }
 
 press_enter(){ echo; read -r -p "Presioná ENTER para volver al menú..." _; }
-
 need_root(){ [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Ejecutá como root: sudo bash $0"; }
 
 backup_if_exists(){
@@ -79,13 +71,13 @@ ensure_deps(){
   has_cmd systemctl || die "No encuentro systemctl (systemd)."
   has_cmd curl || die "Falta curl: sudo apt-get install -y curl"
   has_cmd screen || die "Falta screen: sudo apt-get update && sudo apt-get install -y screen"
+  has_cmd nano || warn "No tenés nano (para editar). Instalá: sudo apt-get install -y nano"
   if ! has_cmd netstat && ! has_cmd ss; then
     warn "No encuentro netstat ni ss. Para ver puertos: sudo apt-get install -y net-tools (o iproute2)."
   fi
 }
 
 install_commands(){
-  # Siempre disponibles
   cat > "$CMD1" <<EOF
 #!/usr/bin/env bash
 rm -f /tmp/el-nene3.sh
@@ -98,7 +90,7 @@ EOF
   chmod +x "$CMD2"
 }
 
-# -------- selection --------
+# -------- RUTAS EXACTAS (según tus ubicaciones) --------
 pick_target(){
   echo "==============================================="
   echo " $APP_NAME"
@@ -106,16 +98,16 @@ pick_target(){
   echo "¿Qué sistema tenés instalado?"
   echo "  1) VPS-MX   -> /etc/VPS-MX/protocolos"
   echo "  2) SSHPLUS  -> /etc/SSHPlus"
-  echo "  3) VPS-AGN  -> /etc/VPS-AGN/protocolos"
-  echo "  4) ADMRufu  -> /etc/ADMRufu"
+  echo "  3) VPS-AGN  -> /etc/VPS-AGN/protocols"
+  echo "  4) ADMRufu  -> /etc/ADMRufu/install"
   echo "  5) LATAM    -> /etc/LATAM/protocolos"
   echo
   read -r -p "Opción (1-5): " opt
   case "$opt" in
     1) TARGET="VPS-MX";  DEST="/etc/VPS-MX/protocolos" ;;
     2) TARGET="SSHPLUS"; DEST="/etc/SSHPlus" ;;
-    3) TARGET="VPS-AGN"; DEST="/etc/VPS-AGN/protocolos" ;;
-    4) TARGET="ADMRufu"; DEST="/etc/ADMRufu" ;;
+    3) TARGET="VPS-AGN"; DEST="/etc/VPS-AGN/protocols" ;;
+    4) TARGET="ADMRufu"; DEST="/etc/ADMRufu/install" ;;
     5) TARGET="LATAM";   DEST="/etc/LATAM/protocolos" ;;
     *) die "Opción inválida." ;;
   esac
@@ -141,7 +133,6 @@ ask_components(){
   [[ "$enable_bad" =~ ^[sS]$ ]] && RUN_BAD=1 || RUN_BAD=0
 }
 
-# -------- state --------
 persist_state(){
   mkdir -p "$STATE_DIR"
   cat > "$STATE_FILE" <<EOF
@@ -162,7 +153,6 @@ load_state(){
   return 1
 }
 
-# -------- downloads --------
 download_asset(){
   local name="$1"
   local url="${RAW_BASE}/files/${name}"
@@ -182,11 +172,11 @@ ensure_assets(){
   fi
 }
 
-# -------- copy/install --------
+# Crea carpeta SIEMPRE y copia en la misma ruta que usa el service
 copy_files(){
   echo
-  echo "📁 Destino: $DEST"
-  mkdir -p "$DEST"  # crea carpeta si no existe
+  echo "📁 Destino (service path): $DEST"
+  mkdir -p "$DEST"
 
   backup_if_exists "$DEST/PDirect.py"
   backup_if_exists "$DEST/proxy.py"
@@ -194,7 +184,7 @@ copy_files(){
   cp -f "$PD_SRC" "$DEST/PDirect.py"
   cp -f "$PX_SRC" "$DEST/proxy.py"
   chmod 755 "$DEST/PDirect.py" "$DEST/proxy.py"
-  ok "Copiados PDirect.py y proxy.py en $DEST"
+  ok "Copiados PDirect.py y proxy.py en $DEST (misma ruta que usa el service)"
 
   if [[ "${RUN_BAD:-0}" -eq 1 ]]; then
     backup_if_exists "$BAD_BIN"
@@ -206,7 +196,6 @@ copy_files(){
   fi
 }
 
-# -------- services (screen + no timeout) --------
 write_service_pdirect(){
   local svc="$SYSTEMD_DIR/$PD_SVC"
   backup_if_exists "$svc"
@@ -222,11 +211,13 @@ WorkingDirectory=${DEST}
 ExecStart=/usr/bin/screen -DmS PDirect /usr/bin/python3 ${DEST}/PDirect.py
 ExecStop=/usr/bin/screen -S PDirect -X quit
 User=root
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  ok "Servicio creado: $PD_SVC"
+  ok "Servicio creado: $PD_SVC (ruta: ${DEST}/PDirect.py)"
 }
 
 write_service_proxy(){
@@ -244,11 +235,13 @@ WorkingDirectory=${DEST}
 ExecStart=/usr/bin/screen -DmS Proxy /usr/bin/python3 ${DEST}/proxy.py
 ExecStop=/usr/bin/screen -S Proxy -X quit
 User=root
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  ok "Servicio creado: $PX_SVC"
+  ok "Servicio creado: $PX_SVC (ruta: ${DEST}/proxy.py)"
 }
 
 write_badvpn_env_default(){
@@ -287,7 +280,6 @@ EOF
 
 daemon_reload(){ systemctl daemon-reload >/dev/null 2>&1 || true; }
 
-# start sin bloquear => vuelve siempre
 enable_start_noblock(){
   [[ "$RUN_PD" -eq 1 ]] && systemctl enable "$PD_SVC" >/dev/null 2>&1 || true
   [[ "$RUN_PX" -eq 1 ]] && systemctl enable "$PX_SVC" >/dev/null 2>&1 || true
@@ -333,7 +325,7 @@ get_default_host(){
   [[ -n "$v" ]] && echo "$v" || echo "-"
 }
 
-# ---- STATUS REAL (screen + LISTEN) ----
+# ---- STATUS REAL ----
 is_screen_running(){
   local name="$1"
   screen -ls 2>/dev/null | grep -qE "[0-9]+\.$name" && echo "RUNNING" || echo "OFF"
@@ -374,7 +366,7 @@ show_status(){
 
   if load_state; then
     echo "📌 Target: $TARGET"
-    echo "📁 Ruta:   $DEST"
+    echo "📁 Ruta (service/copia): $DEST"
     echo "➡️  Destino (DEFAULT_HOST): $(get_default_host "$DEST/PDirect.py")"
   else
     echo "⚠️  No hay instalación registrada (igual detecto procesos/puertos)."
@@ -392,7 +384,6 @@ show_status(){
   echo "PDirect: ${pd_run} | unit: $(svc_enabled "$PD_SVC") | python LISTEN: ${py_ports}"
   echo "proxy:   ${px_run} | unit: $(svc_enabled "$PX_SVC") | python LISTEN: ${py_ports}"
 
-  # BadVPN instalado si hay service o bin o LISTEN
   local bad_inst="NO"
   [[ -f "${SYSTEMD_DIR}/${BAD_SVC}" ]] && bad_inst="SI"
   [[ -x "$BAD_BIN" ]] && bad_inst="SI"
@@ -412,6 +403,51 @@ show_status(){
   echo
   echo "📌 Comandos: pdmenu / automenu"
   echo
+}
+
+# -------- NUEVO: EDITAR MANUAL (nano) --------
+ensure_dest_from_state(){
+  # Si no hay estado, pedimos target para conocer DEST
+  if ! load_state; then
+    warn "No hay instalación registrada. Elegí sistema para saber la ruta."
+    pick_target
+    # No sabemos RUN_*, pero para editar solo importa DEST:
+    RUN_PD=1; RUN_PX=1; RUN_BAD=0
+    persist_state
+  fi
+  mkdir -p "$DEST"
+}
+
+edit_menu(){
+  need_root
+  ensure_dest_from_state
+
+  echo
+  echo "Editar redireccionamiento (manual):"
+  echo "  1) Editar PDirect.py  (nano ${DEST}/PDirect.py)"
+  echo "  2) Editar proxy.py    (nano ${DEST}/proxy.py)"
+  echo "  3) Abrir carpeta DEST (ls -la ${DEST})"
+  echo "  0) Volver"
+  read -r -p "Opción: " e
+
+  case "$e" in
+    1)
+      [[ -f "${DEST}/PDirect.py" ]] || warn "No existe ${DEST}/PDirect.py (instalá primero o copiá el archivo)."
+      nano "${DEST}/PDirect.py"
+      press_enter
+      ;;
+    2)
+      [[ -f "${DEST}/proxy.py" ]] || warn "No existe ${DEST}/proxy.py (instalá primero o copiá el archivo)."
+      nano "${DEST}/proxy.py"
+      press_enter
+      ;;
+    3)
+      ls -la "${DEST}" || true
+      press_enter
+      ;;
+    0) return 0 ;;
+    *) echo "Opción inválida."; press_enter ;;
+  esac
 }
 
 # -------- Firewall UFW --------
@@ -477,7 +513,6 @@ do_install(){
 
   [[ "$RUN_PD" -eq 1 ]] && write_service_pdirect
   [[ "$RUN_PX" -eq 1 ]] && write_service_proxy
-
   if [[ "${RUN_BAD:-0}" -eq 1 ]]; then
     write_badvpn_env_default
     write_service_badvpn
@@ -589,6 +624,7 @@ menu(){
     echo "[8] 🛡️  Firewall UFW (permitir puertos)"
     echo "[9] ✅ Habilitar autostart al reinicio (systemctl enable)"
     echo "[10] ⛔ Deshabilitar autostart (systemctl disable)"
+    echo "[11] ✏️  Editar redireccionamiento (nano PDirect/proxy)"
     echo "[0] Salir"
     echo
     read -r -p "Opción: " op
@@ -603,6 +639,7 @@ menu(){
       8) firewall_menu ;;
       9) enable_boot; press_enter ;;
       10) disable_boot; press_enter ;;
+      11) edit_menu ;;
       0) exit 0 ;;
       *) echo "Opción inválida." ;;
     esac
