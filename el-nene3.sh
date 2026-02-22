@@ -3,18 +3,15 @@ set -euo pipefail
 
 APP_NAME="El NeNe 3.0 – Redireccionamiento de Puertos"
 
-# Siempre agarrar teclado real si viene por pipe
 if [[ ! -t 0 ]] && [[ -r /dev/tty ]]; then
   exec </dev/tty
 fi
 
-# ==== TU REPO ====
 GITHUB_USER="eze1087"
 GITHUB_REPO="Script_autopy"
 GITHUB_BRANCH="main"
 RAW_BASE="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
-# Assets en repo (/files)
 PD_FILE="PDirect.py"
 PX_FILE="proxy.py"
 BAD_FILE="badvpn-udpgw"
@@ -25,7 +22,6 @@ SYSTEMD_DIR="/etc/systemd/system"
 PD_SVC="pdirect.service"
 PX_SVC="proxy.service"
 
-# BadVPN
 BAD_SVC="badvpn-udpgw.service"
 BAD_BIN="/bin/badvpn-udpgw"
 BAD_WRAPPER="/bin/antcrashvpn.sh"
@@ -44,16 +40,9 @@ ok(){ echo "✅ $*"; }
 warn(){ echo "⚠️  $*"; }
 has_cmd(){ command -v "$1" >/dev/null 2>&1; }
 
-press_enter(){
-  echo
-  read -r -p "Presioná ENTER para volver al menú..." _
-}
+press_enter(){ echo; read -r -p "Presioná ENTER para volver al menú..." _; }
 
-need_root(){
-  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    die "Ejecutá como root: sudo bash $0"
-  fi
-}
+need_root(){ [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Ejecutá como root: sudo bash $0"; }
 
 backup_if_exists(){
   local f="$1"
@@ -72,7 +61,6 @@ ensure_deps(){
 }
 
 install_commands(){
-  # Se instala SIEMPRE (aunque no instales servicios)
   cat > "$CMD1" <<EOF
 #!/usr/bin/env bash
 rm -f /tmp/el-nene3.sh
@@ -169,7 +157,7 @@ ensure_assets(){
 copy_files(){
   echo
   echo "📁 Destino: $DEST"
-  mkdir -p "$DEST"   # <-- CREA carpeta si no existe SIEMPRE
+  mkdir -p "$DEST"
 
   backup_if_exists "$DEST/PDirect.py"
   backup_if_exists "$DEST/proxy.py"
@@ -269,7 +257,6 @@ EOF
 
 daemon_reload(){ systemctl daemon-reload >/dev/null 2>&1 || true; }
 
-# IMPORTANTE: start --no-block => NO SE CUELGA, SIEMPRE VUELVE AL MENÚ
 enable_start_noblock(){
   [[ "$RUN_PD" -eq 1 ]] && systemctl enable "$PD_SVC" >/dev/null 2>&1 || true
   [[ "$RUN_PX" -eq 1 ]] && systemctl enable "$PX_SVC" >/dev/null 2>&1 || true
@@ -278,9 +265,20 @@ enable_start_noblock(){
   [[ "$RUN_PD" -eq 1 ]] && systemctl start --no-block "$PD_SVC" >/dev/null 2>&1 || true
   [[ "$RUN_PX" -eq 1 ]] && systemctl start --no-block "$PX_SVC" >/dev/null 2>&1 || true
   [[ "${RUN_BAD:-0}" -eq 1 ]] && systemctl start --no-block "$BAD_SVC" >/dev/null 2>&1 || true
+}
 
-  systemctl reset-failed "$PD_SVC" >/dev/null 2>&1 || true
-  systemctl reset-failed "$PX_SVC" >/dev/null 2>&1 || true
+enable_boot(){
+  systemctl enable "$PD_SVC" >/dev/null 2>&1 || true
+  systemctl enable "$PX_SVC" >/dev/null 2>&1 || true
+  systemctl enable "$BAD_SVC" >/dev/null 2>&1 || true
+  ok "Autostart HABILITADO (arranca al reinicio)."
+}
+
+disable_boot(){
+  systemctl disable "$PD_SVC" >/dev/null 2>&1 || true
+  systemctl disable "$PX_SVC" >/dev/null 2>&1 || true
+  systemctl disable "$BAD_SVC" >/dev/null 2>&1 || true
+  ok "Autostart DESHABILITADO."
 }
 
 svc_state(){ systemctl is-active --quiet "$1" && echo "ON" || echo "OFF"; }
@@ -322,19 +320,73 @@ show_status(){
   echo "PDirect: $(svc_state "$PD_SVC") | $(svc_enabled "$PD_SVC")"
   echo "proxy:   $(svc_state "$PX_SVC") | $(svc_enabled "$PX_SVC")"
   if systemctl list-unit-files 2>/dev/null | grep -q "^${BAD_SVC}"; then
-    local bp
-    bp="$(badvpn_port_current)"
+    local bp; bp="$(badvpn_port_current)"
     echo "BadVPN:  $(svc_state "$BAD_SVC") | $(svc_enabled "$BAD_SVC") | port: 127.0.0.1:${bp}"
   else
     echo "BadVPN:  NO INSTALADO"
   fi
   echo
+  echo "📌 Comandos: pdmenu / automenu"
+  echo
 }
 
+# -------- Firewall UFW --------
+ensure_ufw(){
+  if ! has_cmd ufw; then
+    warn "No tenés ufw. Instalando..."
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y ufw >/dev/null 2>&1 || die "No pude instalar ufw."
+  fi
+}
+
+firewall_menu(){
+  need_root
+  ensure_ufw
+  echo
+  echo "Firewall (UFW):"
+  echo "  1) Permitir SSH (22) + habilitar UFW"
+  echo "  2) Permitir puertos LISTEN en 0.0.0.0/::: + habilitar UFW"
+  echo "  3) Ver estado UFW"
+  echo "  4) Deshabilitar UFW"
+  read -r -p "Opción: " f
+
+  case "$f" in
+    1)
+      ufw allow 22/tcp >/dev/null 2>&1 || true
+      ufw --force enable >/dev/null 2>&1 || true
+      ok "UFW habilitado y SSH permitido."
+      ;;
+    2)
+      ufw allow 22/tcp >/dev/null 2>&1 || true
+
+      local ports=""
+      if has_cmd netstat; then
+        ports="$(netstat -tnpl 2>/dev/null | awk '$6=="LISTEN" && ($4 ~ /^0\.0\.0\.0:/ || $4 ~ /^:::/){print $4}' \
+          | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq)"
+      elif has_cmd ss; then
+        ports="$(ss -lnt 2>/dev/null | awk '$4 ~ /^0\.0\.0\.0:/ || $4 ~ /^:::/ {print $4}' \
+          | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq)"
+      fi
+
+      for p in $ports; do
+        ufw allow "${p}/tcp" >/dev/null 2>&1 || true
+      done
+
+      ufw --force enable >/dev/null 2>&1 || true
+      ok "UFW habilitado. Puertos permitidos: ${ports:-"(ninguno detectado)"}"
+      ;;
+    3) ufw status verbose || true ;;
+    4) ufw disable || true; ok "UFW deshabilitado." ;;
+    *) echo "Opción inválida." ;;
+  esac
+  press_enter
+}
+
+# -------- Actions --------
 do_install(){
   need_root
   ensure_deps
-  install_commands   # <-- SIEMPRE deja pdmenu/automenu instalados
+  install_commands
 
   pick_target
   ask_components
@@ -351,7 +403,7 @@ do_install(){
   fi
 
   daemon_reload
-  enable_start_noblock   # <-- NO BLOQUEA
+  enable_start_noblock
   persist_state
 
   ok "Instalación/actualización completada."
@@ -359,32 +411,9 @@ do_install(){
   press_enter
 }
 
-do_stop_all(){
-  need_root
-  systemctl stop "$PD_SVC" 2>/dev/null || true
-  systemctl stop "$PX_SVC" 2>/dev/null || true
-  systemctl stop "$BAD_SVC" 2>/dev/null || true
-  ok "Servicios detenidos."
-  press_enter
-}
-
-do_start_all(){
-  need_root
-  systemctl start --no-block "$PD_SVC" 2>/dev/null || true
-  systemctl start --no-block "$PX_SVC" 2>/dev/null || true
-  systemctl start --no-block "$BAD_SVC" 2>/dev/null || true
-  ok "Servicios iniciados."
-  press_enter
-}
-
-do_restart_all(){
-  need_root
-  systemctl restart --no-block "$PD_SVC" 2>/dev/null || true
-  systemctl restart --no-block "$PX_SVC" 2>/dev/null || true
-  systemctl restart --no-block "$BAD_SVC" 2>/dev/null || true
-  ok "Servicios reiniciados."
-  press_enter
-}
+do_stop_all(){ need_root; systemctl stop "$PD_SVC" 2>/dev/null || true; systemctl stop "$PX_SVC" 2>/dev/null || true; systemctl stop "$BAD_SVC" 2>/dev/null || true; ok "Servicios detenidos."; press_enter; }
+do_start_all(){ need_root; systemctl start --no-block "$PD_SVC" 2>/dev/null || true; systemctl start --no-block "$PX_SVC" 2>/dev/null || true; systemctl start --no-block "$BAD_SVC" 2>/dev/null || true; ok "Servicios iniciados."; press_enter; }
+do_restart_all(){ need_root; systemctl restart --no-block "$PD_SVC" 2>/dev/null || true; systemctl restart --no-block "$PX_SVC" 2>/dev/null || true; systemctl restart --no-block "$BAD_SVC" 2>/dev/null || true; ok "Servicios reiniciados."; press_enter; }
 
 do_logs(){
   need_root
@@ -405,8 +434,7 @@ do_logs(){
 
 badvpn_set_port(){
   need_root
-  local current
-  current="$(badvpn_port_current)"
+  local current; current="$(badvpn_port_current)"
   echo
   read -r -p "Puerto BadVPN actual: ${current}. Nuevo puerto (ENTER = ${BAD_DEFAULT_PORT}): " np
   np="${np:-$BAD_DEFAULT_PORT}"
@@ -436,7 +464,7 @@ do_uninstall(){
 menu(){
   need_root
   ensure_deps
-  install_commands  # <-- deja pdmenu/automenu SIEMPRE disponibles
+  install_commands
 
   while true; do
     echo
@@ -454,6 +482,9 @@ menu(){
     echo "[5] 📜 Ver logs"
     echo "[6] 🧨 Desinstalar servicios"
     echo "[7] 🔧 Cambiar puerto BadVPN (default 7300)"
+    echo "[8] 🛡️  Firewall UFW (permitir puertos)"
+    echo "[9] ✅ Habilitar autostart al reinicio (systemctl enable)"
+    echo "[10] ⛔ Deshabilitar autostart (systemctl disable)"
     echo "[0] Salir"
     echo
     read -r -p "Opción: " op
@@ -465,6 +496,9 @@ menu(){
       5) do_logs ;;
       6) do_uninstall ;;
       7) badvpn_set_port ;;
+      8) firewall_menu ;;
+      9) enable_boot; press_enter ;;
+      10) disable_boot; press_enter ;;
       0) exit 0 ;;
       *) echo "Opción inválida." ;;
     esac
