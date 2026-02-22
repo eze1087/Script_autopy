@@ -1,17 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ==========================================================
+#  El NeNe 3.0 – Redireccionamiento de Puertos
+#
+#  ✅ systemd + screen (como manual)
+#  ✅ FIX timeout: Type=oneshot + RemainAfterExit=yes + ExecStop
+#  ✅ NO pregunta puertos de PDirect/proxy (se editan en el .py)
+#  ✅ BadVPN: 7300 por defecto (editable desde menú)
+#  ✅ Descarga assets desde GitHub raw (files/)
+#  ✅ Estado guardado: /var/lib/nene3/target.conf
+#  ✅ Comandos instalados: pdmenu y automenu
+#  ✅ Firewall UFW (permitir puertos)
+#  ✅ Autostart enable/disable (arranque al reinicio)
+#  ✅ STATUS REAL: detecta screen + puertos LISTEN (netstat/ss)
+#  ✅ Vuelve al menú tras cada acción (ENTER)
+# ==========================================================
+
 APP_NAME="El NeNe 3.0 – Redireccionamiento de Puertos"
 
+# stdin por pipe => usar teclado real
 if [[ ! -t 0 ]] && [[ -r /dev/tty ]]; then
   exec </dev/tty
 fi
 
+# ==== TU REPO ====
 GITHUB_USER="eze1087"
 GITHUB_REPO="Script_autopy"
 GITHUB_BRANCH="main"
 RAW_BASE="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
+# Assets en repo (/files)
 PD_FILE="PDirect.py"
 PX_FILE="proxy.py"
 BAD_FILE="badvpn-udpgw"
@@ -22,6 +41,7 @@ SYSTEMD_DIR="/etc/systemd/system"
 PD_SVC="pdirect.service"
 PX_SVC="proxy.service"
 
+# BadVPN
 BAD_SVC="badvpn-udpgw.service"
 BAD_BIN="/bin/badvpn-udpgw"
 BAD_WRAPPER="/bin/antcrashvpn.sh"
@@ -34,6 +54,7 @@ STATE_FILE="${STATE_DIR}/target.conf"
 CMD1="/usr/local/bin/pdmenu"
 CMD2="/usr/local/bin/automenu"
 
+# -------- helpers --------
 ts(){ date +"%Y%m%d%H%M%S"; }
 die(){ echo "❌ $*"; exit 1; }
 ok(){ echo "✅ $*"; }
@@ -58,9 +79,13 @@ ensure_deps(){
   has_cmd systemctl || die "No encuentro systemctl (systemd)."
   has_cmd curl || die "Falta curl: sudo apt-get install -y curl"
   has_cmd screen || die "Falta screen: sudo apt-get update && sudo apt-get install -y screen"
+  if ! has_cmd netstat && ! has_cmd ss; then
+    warn "No encuentro netstat ni ss. Para ver puertos: sudo apt-get install -y net-tools (o iproute2)."
+  fi
 }
 
 install_commands(){
+  # Siempre disponibles
   cat > "$CMD1" <<EOF
 #!/usr/bin/env bash
 rm -f /tmp/el-nene3.sh
@@ -73,6 +98,7 @@ EOF
   chmod +x "$CMD2"
 }
 
+# -------- selection --------
 pick_target(){
   echo "==============================================="
   echo " $APP_NAME"
@@ -115,6 +141,7 @@ ask_components(){
   [[ "$enable_bad" =~ ^[sS]$ ]] && RUN_BAD=1 || RUN_BAD=0
 }
 
+# -------- state --------
 persist_state(){
   mkdir -p "$STATE_DIR"
   cat > "$STATE_FILE" <<EOF
@@ -135,6 +162,7 @@ load_state(){
   return 1
 }
 
+# -------- downloads --------
 download_asset(){
   local name="$1"
   local url="${RAW_BASE}/files/${name}"
@@ -154,10 +182,11 @@ ensure_assets(){
   fi
 }
 
+# -------- copy/install --------
 copy_files(){
   echo
   echo "📁 Destino: $DEST"
-  mkdir -p "$DEST"
+  mkdir -p "$DEST"  # crea carpeta si no existe
 
   backup_if_exists "$DEST/PDirect.py"
   backup_if_exists "$DEST/proxy.py"
@@ -177,6 +206,7 @@ copy_files(){
   fi
 }
 
+# -------- services (screen + no timeout) --------
 write_service_pdirect(){
   local svc="$SYSTEMD_DIR/$PD_SVC"
   backup_if_exists "$svc"
@@ -257,6 +287,7 @@ EOF
 
 daemon_reload(){ systemctl daemon-reload >/dev/null 2>&1 || true; }
 
+# start sin bloquear => vuelve siempre
 enable_start_noblock(){
   [[ "$RUN_PD" -eq 1 ]] && systemctl enable "$PD_SVC" >/dev/null 2>&1 || true
   [[ "$RUN_PX" -eq 1 ]] && systemctl enable "$PX_SVC" >/dev/null 2>&1 || true
@@ -281,8 +312,8 @@ disable_boot(){
   ok "Autostart DESHABILITADO."
 }
 
-svc_state(){ systemctl is-active --quiet "$1" && echo "ON" || echo "OFF"; }
 svc_enabled(){ systemctl is-enabled --quiet "$1" 2>/dev/null && echo "ENABLED" || echo "DISABLED"; }
+svc_state(){ systemctl is-active --quiet "$1" && echo "ON" || echo "OFF"; }
 
 badvpn_port_current(){
   local port="$BAD_DEFAULT_PORT"
@@ -302,29 +333,82 @@ get_default_host(){
   [[ -n "$v" ]] && echo "$v" || echo "-"
 }
 
+# ---- STATUS REAL (screen + LISTEN) ----
+is_screen_running(){
+  local name="$1"
+  screen -ls 2>/dev/null | grep -qE "[0-9]+\.$name" && echo "RUNNING" || echo "OFF"
+}
+
+listen_ports_by_prog(){
+  local prog="$1"
+  if has_cmd netstat; then
+    netstat -tnpl 2>/dev/null \
+      | awk -v p="$prog" '$6=="LISTEN" && $7 ~ p {print $4}' \
+      | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq | paste -sd, - || echo "-"
+  elif has_cmd ss; then
+    ss -lntp 2>/dev/null \
+      | awk -v p="$prog" '$0 ~ p {print $4}' \
+      | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq | paste -sd, - || echo "-"
+  else
+    echo "-"
+  fi
+}
+
+port_open(){
+  local port="$1"
+  [[ -n "$port" ]] || { echo "?"; return; }
+  if has_cmd netstat; then
+    netstat -tnpl 2>/dev/null | awk '{print $4,$6}' | grep -qE "[:.]${port}[[:space:]]+LISTEN$" && echo "OPEN" || echo "CLOSED"
+  elif has_cmd ss; then
+    ss -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}$" && echo "OPEN" || echo "CLOSED"
+  else
+    echo "?"
+  fi
+}
+
 show_status(){
   echo
   echo "══════════════════════════════════════════"
   echo "🔎 Redireccionamiento activo (El NeNe 3.0)"
   echo "══════════════════════════════════════════"
 
-  if ! load_state; then
-    warn "Todavía no hay instalación registrada. Usá [1] Instalar/Actualizar"
-    return
+  if load_state; then
+    echo "📌 Target: $TARGET"
+    echo "📁 Ruta:   $DEST"
+    echo "➡️  Destino (DEFAULT_HOST): $(get_default_host "$DEST/PDirect.py")"
+  else
+    echo "⚠️  No hay instalación registrada (igual detecto procesos/puertos)."
+  fi
+  echo
+
+  local pd_run px_run
+  pd_run="$(is_screen_running "PDirect")"
+  px_run="$(is_screen_running "Proxy")"
+
+  local py_ports bad_ports
+  py_ports="$(listen_ports_by_prog "python3")"
+  bad_ports="$(listen_ports_by_prog "badvpn-udpgw")"
+
+  echo "PDirect: ${pd_run} | unit: $(svc_enabled "$PD_SVC") | python LISTEN: ${py_ports}"
+  echo "proxy:   ${px_run} | unit: $(svc_enabled "$PX_SVC") | python LISTEN: ${py_ports}"
+
+  # BadVPN instalado si hay service o bin o LISTEN
+  local bad_inst="NO"
+  [[ -f "${SYSTEMD_DIR}/${BAD_SVC}" ]] && bad_inst="SI"
+  [[ -x "$BAD_BIN" ]] && bad_inst="SI"
+  [[ "$bad_ports" != "-" && -n "$bad_ports" ]] && bad_inst="SI"
+
+  if [[ "$bad_inst" == "SI" ]]; then
+    local bp
+    bp="$(badvpn_port_current)"
+    if [[ ! -f "$BAD_ENV" ]] && [[ "$bad_ports" != "-" ]]; then
+      bp="$(echo "$bad_ports" | cut -d, -f1)"
+    fi
+    echo "BadVPN:  $(svc_state "$BAD_SVC") | $(svc_enabled "$BAD_SVC") | port: ${bp} ($(port_open "$bp")) | badvpn LISTEN: ${bad_ports}"
+  else
+    echo "BadVPN:  NO INSTALADO (no bin, no service, no LISTEN)"
   fi
 
-  echo "📌 Target: $TARGET"
-  echo "📁 Ruta:   $DEST"
-  echo "➡️  Destino (DEFAULT_HOST): $(get_default_host "$DEST/PDirect.py")"
-  echo
-  echo "PDirect: $(svc_state "$PD_SVC") | $(svc_enabled "$PD_SVC")"
-  echo "proxy:   $(svc_state "$PX_SVC") | $(svc_enabled "$PX_SVC")"
-  if systemctl list-unit-files 2>/dev/null | grep -q "^${BAD_SVC}"; then
-    local bp; bp="$(badvpn_port_current)"
-    echo "BadVPN:  $(svc_state "$BAD_SVC") | $(svc_enabled "$BAD_SVC") | port: 127.0.0.1:${bp}"
-  else
-    echo "BadVPN:  NO INSTALADO"
-  fi
   echo
   echo "📌 Comandos: pdmenu / automenu"
   echo
@@ -358,7 +442,6 @@ firewall_menu(){
       ;;
     2)
       ufw allow 22/tcp >/dev/null 2>&1 || true
-
       local ports=""
       if has_cmd netstat; then
         ports="$(netstat -tnpl 2>/dev/null | awk '$6=="LISTEN" && ($4 ~ /^0\.0\.0\.0:/ || $4 ~ /^:::/){print $4}' \
@@ -367,11 +450,9 @@ firewall_menu(){
         ports="$(ss -lnt 2>/dev/null | awk '$4 ~ /^0\.0\.0\.0:/ || $4 ~ /^:::/ {print $4}' \
           | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq)"
       fi
-
       for p in $ports; do
         ufw allow "${p}/tcp" >/dev/null 2>&1 || true
       done
-
       ufw --force enable >/dev/null 2>&1 || true
       ok "UFW habilitado. Puertos permitidos: ${ports:-"(ninguno detectado)"}"
       ;;
@@ -382,7 +463,7 @@ firewall_menu(){
   press_enter
 }
 
-# -------- Actions --------
+# -------- actions --------
 do_install(){
   need_root
   ensure_deps
@@ -411,9 +492,32 @@ do_install(){
   press_enter
 }
 
-do_stop_all(){ need_root; systemctl stop "$PD_SVC" 2>/dev/null || true; systemctl stop "$PX_SVC" 2>/dev/null || true; systemctl stop "$BAD_SVC" 2>/dev/null || true; ok "Servicios detenidos."; press_enter; }
-do_start_all(){ need_root; systemctl start --no-block "$PD_SVC" 2>/dev/null || true; systemctl start --no-block "$PX_SVC" 2>/dev/null || true; systemctl start --no-block "$BAD_SVC" 2>/dev/null || true; ok "Servicios iniciados."; press_enter; }
-do_restart_all(){ need_root; systemctl restart --no-block "$PD_SVC" 2>/dev/null || true; systemctl restart --no-block "$PX_SVC" 2>/dev/null || true; systemctl restart --no-block "$BAD_SVC" 2>/dev/null || true; ok "Servicios reiniciados."; press_enter; }
+do_stop_all(){
+  need_root
+  systemctl stop "$PD_SVC" 2>/dev/null || true
+  systemctl stop "$PX_SVC" 2>/dev/null || true
+  systemctl stop "$BAD_SVC" 2>/dev/null || true
+  ok "Servicios detenidos."
+  press_enter
+}
+
+do_start_all(){
+  need_root
+  systemctl start --no-block "$PD_SVC" 2>/dev/null || true
+  systemctl start --no-block "$PX_SVC" 2>/dev/null || true
+  systemctl start --no-block "$BAD_SVC" 2>/dev/null || true
+  ok "Servicios iniciados."
+  press_enter
+}
+
+do_restart_all(){
+  need_root
+  systemctl restart --no-block "$PD_SVC" 2>/dev/null || true
+  systemctl restart --no-block "$PX_SVC" 2>/dev/null || true
+  systemctl restart --no-block "$BAD_SVC" 2>/dev/null || true
+  ok "Servicios reiniciados."
+  press_enter
+}
 
 do_logs(){
   need_root
