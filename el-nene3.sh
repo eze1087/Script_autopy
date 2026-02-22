@@ -1,33 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ==========================================================
-#  El NeNe 3.0 – Redireccionamiento de Puertos (FINAL)
-#
-#  ✅ NO quita funciones: instala/actualiza, stop/start/restart, logs,
-#     desinstalar, badvpn port, firewall UFW, autostart enable/disable,
-#     editar manual (nano), liberar 80/443, reiniciar SSH/DROPBEAR,
-#     comandos pdmenu/automenu, status real.
-#
-#  ✅ USA TU SERVICIO "PROBADO" (systemd + screen + Restart=on-failure)
-#     Solo ajusta rutas ExecStart/WorkingDirectory según el sistema elegido.
-#
-#  ✅ RUTAS EXACTAS + mkdir -p (service = ruta = copia)
-#     VPS-MX   -> /etc/VPS-MX/protocolos
-#     SSHPLUS  -> /etc/SSHPlus
-#     VPS-AGN  -> /etc/VPS-AGN/protocols
-#     ADMRufu  -> /etc/ADMRufu/install
-#     LATAM    -> /etc/LATAM/protocolos
-#
-#  ✅ Opción 1: pisa PDirect.py / proxy.py (sin backups repetidos)
-#  ✅ Logs: no rompe por instalaciones previas (detecta unidades)
-#  ✅ Menú siempre vuelve (ENTER) con run_step
-#  ✅ Opción 13: texto normal (visible)
-# ==========================================================
-
 APP_NAME="El NeNe 3.0 – Redireccionamiento de Puertos"
 
-# stdin por pipe => usar teclado real
 if [[ ! -t 0 ]] && [[ -r /dev/tty ]]; then
   exec </dev/tty
 fi
@@ -62,7 +37,6 @@ STATE_FILE="${STATE_DIR}/target.conf"
 CMD1="/usr/local/bin/pdmenu"
 CMD2="/usr/local/bin/automenu"
 
-# ---------------- helpers ----------------
 ts(){ date +"%Y%m%d%H%M%S"; }
 die(){ echo "❌ $*"; exit 1; }
 ok(){ echo "✅ $*"; }
@@ -72,7 +46,6 @@ has_cmd(){ command -v "$1" >/dev/null 2>&1; }
 press_enter(){ echo; read -r -p "Presioná ENTER para volver al menú..." _; }
 need_root(){ [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Ejecutá como root: sudo bash $0"; }
 
-# runner: siempre vuelve al menú
 run_step(){
   local title="$1"; shift || true
   echo; echo "▶️  $title"
@@ -84,7 +57,6 @@ run_step(){
   press_enter
 }
 
-# Backup ÚNICO (para binarios/servicios) => evita miles de backups
 backup_once(){
   local f="$1"
   [[ -f "$f" ]] || return 0
@@ -94,11 +66,13 @@ backup_once(){
 }
 
 ensure_deps(){
-  has_cmd python3 || die "Falta python3: sudo apt-get update && sudo apt-get install -y python3"
   has_cmd systemctl || die "No encuentro systemctl (systemd)."
   has_cmd curl || die "Falta curl: sudo apt-get install -y curl"
-  has_cmd screen || die "Falta screen: sudo apt-get update && sudo apt-get install -y screen"
+  has_cmd screen || warn "No tenés screen (SSHPLUS/VPS-MX/ADMRufu lo usan). Instalá: sudo apt-get install -y screen"
   has_cmd nano || warn "No tenés nano (para editar). Instalá: sudo apt-get install -y nano"
+  if ! has_cmd python3 && ! has_cmd python; then
+    die "Falta python/python3. Instalá: sudo apt-get update && sudo apt-get install -y python3"
+  fi
   if ! has_cmd netstat && ! has_cmd ss; then
     warn "No encuentro netstat ni ss. Para ver puertos: sudo apt-get install -y net-tools (o iproute2)."
   fi
@@ -117,7 +91,7 @@ EOF
   chmod +x "$CMD2"
 }
 
-# ---------------- RUTAS EXACTAS ----------------
+# ---------- MAPA: DEST + TIPO DE SERVICIO ----------
 pick_target(){
   echo "==============================================="
   echo " $APP_NAME"
@@ -160,7 +134,6 @@ ask_components(){
   [[ "$enable_bad" =~ ^[sS]$ ]] && RUN_BAD=1 || RUN_BAD=0
 }
 
-# ---------------- state ----------------
 persist_state(){
   mkdir -p "$STATE_DIR"
   cat > "$STATE_FILE" <<EOF
@@ -181,7 +154,6 @@ load_state(){
   return 1
 }
 
-# ---------------- downloads ----------------
 download_asset(){
   local name="$1"
   local url="${RAW_BASE}/files/${name}"
@@ -201,13 +173,11 @@ ensure_assets(){
   fi
 }
 
-# ---------------- copy/install ----------------
-# ✅ pisa SIEMPRE (sin backups repetidos de .py)
+# Pisa SIEMPRE (sin backups repetidos)
 copy_files(){
   echo
   echo "📁 Destino (service path): $DEST"
   mkdir -p "$DEST"
-
   cp -f "$PD_SRC" "$DEST/PDirect.py"
   cp -f "$PX_SRC" "$DEST/proxy.py"
   chmod 755 "$DEST/PDirect.py" "$DEST/proxy.py"
@@ -223,7 +193,7 @@ copy_files(){
   fi
 }
 
-# ---------------- liberar 80/443 ----------------
+# --------- Liberar 80/443 ----------
 listener_prog_on_port(){
   local port="$1"
   if has_cmd netstat; then
@@ -273,35 +243,17 @@ free_ports_80_443(){
   fi
 }
 
-# ---------------- SERVICES: USA TU FORMATO PROBADO ----------------
-# (systemd simple + screen -DmS + Restart=on-failure + RestartSec=5)
-write_service_pdirect(){
-  local svc="$SYSTEMD_DIR/$PD_SVC"
-  backup_once "$svc"
-  cat > "$svc" <<EOF
+# ====== SERVICES POR SISTEMA (exactos a tus plantillas) ======
+write_services_by_target(){
+  case "$TARGET" in
+    SSHPLUS)
+      # Proxy (screen)
+      if [[ "${RUN_PX:-0}" -eq 1 ]]; then
+        local svc="$SYSTEMD_DIR/$PX_SVC"
+        backup_once "$svc"
+        cat > "$svc" <<EOF
 [Unit]
-Description=Ejecutar PDirect en una sesión de screen (${TARGET})
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/screen -DmS PDirect /usr/bin/python3 ${DEST}/PDirect.py
-WorkingDirectory=${DEST}
-User=root
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  ok "Servicio PD creado/actualizado: $PD_SVC -> ${DEST}/PDirect.py"
-}
-
-write_service_proxy(){
-  local svc="$SYSTEMD_DIR/$PX_SVC"
-  backup_once "$svc"
-  cat > "$svc" <<EOF
-[Unit]
-Description=Ejecutar proxy en una sesión de screen (${TARGET})
+Description=Ejecutar proxy en una sesión de screen
 After=network.target
 
 [Service]
@@ -314,9 +266,126 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-  ok "Servicio Proxy creado/actualizado: $PX_SVC -> ${DEST}/proxy.py"
+        ok "Servicio proxy: $PX_SVC"
+      fi
+
+      # PDirect (screen)
+      if [[ "${RUN_PD:-0}" -eq 1 ]]; then
+        local svc="$SYSTEMD_DIR/$PD_SVC"
+        backup_once "$svc"
+        cat > "$svc" <<EOF
+[Unit]
+Description=Ejecutar PDirect en una sesión de screen
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/screen -DmS PDirect /usr/bin/python3 ${DEST}/PDirect.py
+WorkingDirectory=${DEST}
+User=root
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        ok "Servicio PDirect: $PD_SVC"
+      fi
+      ;;
+    VPS-MX)
+      # PDirect (screen + python) tal cual tu ejemplo
+      if [[ "${RUN_PD:-0}" -eq 1 ]]; then
+        local svc="$SYSTEMD_DIR/$PD_SVC"
+        backup_once "$svc"
+        cat > "$svc" <<EOF
+[Unit]
+Description=Ejecutar PDirect en una sesión de screen
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/screen -DmS PDirect python ${DEST}/PDirect.py
+WorkingDirectory=${DEST}
+User=root
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        ok "Servicio PDirect: $PD_SVC"
+      fi
+      ;;
+    ADMRufu)
+      # PDirect (screen + python3)
+      if [[ "${RUN_PD:-0}" -eq 1 ]]; then
+        local svc="$SYSTEMD_DIR/$PD_SVC"
+        backup_once "$svc"
+        cat > "$svc" <<EOF
+[Unit]
+Description=Ejecutar PDirect en una sesión de screen
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/screen -DmS PDirect /usr/bin/python3 ${DEST}/PDirect.py
+WorkingDirectory=${DEST}
+User=root
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        ok "Servicio PDirect: $PD_SVC"
+      fi
+      ;;
+    VPS-AGN)
+      # PDirect (Type=simple + env python3) tal cual tu ejemplo
+      if [[ "${RUN_PD:-0}" -eq 1 ]]; then
+        local svc="$SYSTEMD_DIR/$PD_SVC"
+        backup_once "$svc"
+        cat > "$svc" <<EOF
+[Unit]
+Description=Ejecutar PDirect en segundo plano
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${DEST}
+ExecStart=/usr/bin/env python3 ${DEST}/PDirect.py
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        ok "Servicio PDirect: $PD_SVC"
+      fi
+      ;;
+    LATAM)
+      # PDirect (screen + python3, ruta LATAM)
+      if [[ "${RUN_PD:-0}" -eq 1 ]]; then
+        local svc="$SYSTEMD_DIR/$PD_SVC"
+        backup_once "$svc"
+        cat > "$svc" <<EOF
+[Unit]
+Description=Ejecutar PDirect en una sesión de screen
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/screen -DmS PDirect /usr/bin/python3 ${DEST}/PDirect.py
+WorkingDirectory=${DEST}
+User=root
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        ok "Servicio PDirect: $PD_SVC"
+      fi
+      ;;
+  esac
 }
 
+# ---- BadVPN ----
 write_badvpn_env_default(){
   mkdir -p /etc/default
   [[ -f "$BAD_ENV" ]] || echo "BADVPN_PORT=${BAD_DEFAULT_PORT}" > "$BAD_ENV"
@@ -343,7 +412,7 @@ LimitNOFILE=999999
 [Install]
 WantedBy=multi-user.target
 EOF
-  ok "Servicio BadVPN creado/actualizado: $BAD_SVC"
+  ok "Servicio BadVPN: $BAD_SVC"
 }
 
 daemon_reload(){ systemctl daemon-reload >/dev/null 2>&1 || true; }
@@ -373,7 +442,6 @@ disable_boot(){
 }
 
 svc_enabled(){ systemctl is-enabled --quiet "$1" 2>/dev/null && echo "ENABLED" || echo "DISABLED"; }
-svc_state(){ systemctl is-active --quiet "$1" && echo "ON" || echo "OFF"; }
 
 badvpn_port_current(){
   local port="$BAD_DEFAULT_PORT"
@@ -385,7 +453,7 @@ badvpn_port_current(){
   echo "$port"
 }
 
-# ---------------- STATUS REAL ----------------
+# ---- STATUS REAL ----
 is_screen_running(){
   local name="$1"
   screen -ls 2>/dev/null | grep -qE "[0-9]+\.$name" && echo "RUNNING" || echo "OFF"
@@ -432,7 +500,7 @@ show_status(){
   echo
 }
 
-# ---------------- LOGS MEJORADOS (instalaciones previas) ----------------
+# ---- LOGS MEJORADOS ----
 unit_exists(){
   systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "$1"
 }
@@ -453,35 +521,23 @@ do_logs(){
 
   case "$o" in
     1)
-      if unit_exists "$PD_SVC"; then
-        journalctl -u "$PD_SVC" --no-pager -n 80 || true
-      else
-        echo "⚠️  No existe la unidad: $PD_SVC (instalación previa con otro nombre)."
-        show_related_units
-      fi
+      if unit_exists "$PD_SVC"; then journalctl -u "$PD_SVC" --no-pager -n 80 || true
+      else echo "⚠️  No existe la unidad: $PD_SVC"; show_related_units; fi
       ;;
     2)
-      if unit_exists "$PX_SVC"; then
-        journalctl -u "$PX_SVC" --no-pager -n 80 || true
-      else
-        echo "⚠️  No existe la unidad: $PX_SVC (instalación previa con otro nombre)."
-        show_related_units
-      fi
+      if unit_exists "$PX_SVC"; then journalctl -u "$PX_SVC" --no-pager -n 80 || true
+      else echo "⚠️  No existe la unidad: $PX_SVC"; show_related_units; fi
       ;;
     3)
-      if unit_exists "$BAD_SVC"; then
-        journalctl -u "$BAD_SVC" --no-pager -n 80 || true
-      else
-        echo "⚠️  No existe la unidad: $BAD_SVC (puede estar con otro nombre o sin service)."
-        show_related_units
-      fi
+      if unit_exists "$BAD_SVC"; then journalctl -u "$BAD_SVC" --no-pager -n 80 || true
+      else echo "⚠️  No existe la unidad: $BAD_SVC"; show_related_units; fi
       ;;
     4) show_related_units ;;
     *) echo "Opción inválida." ;;
   esac
 }
 
-# ---------------- editar manual ----------------
+# ---- editar manual ----
 ensure_dest_from_state(){
   if ! load_state; then
     warn "No hay instalación registrada. Elegí sistema para saber la ruta."
@@ -509,7 +565,7 @@ edit_menu(){
   esac
 }
 
-# ---------------- Firewall UFW ----------------
+# ---- Firewall UFW ----
 ensure_ufw(){
   if ! has_cmd ufw; then
     warn "No tenés ufw. Instalando..."
@@ -549,7 +605,7 @@ firewall_menu(){
   esac
 }
 
-# ---------------- NUEVO: Reiniciar SSH/DROPBEAR ----------------
+# ---- Reiniciar SSH/DROPBEAR ----
 restart_ssh_dropbear(){
   need_root
   echo
@@ -560,13 +616,12 @@ restart_ssh_dropbear(){
   ok "SSH/DROPBEAR reiniciados."
 }
 
-# ---------------- actions ----------------
+# ---- acciones ----
 do_install(){
   need_root
   ensure_deps
   install_commands
 
-  # libera 80/443 antes de instalar (como querías)
   free_ports_80_443
 
   pick_target
@@ -575,37 +630,18 @@ do_install(){
   ensure_assets
   copy_files
 
-  [[ "$RUN_PD" -eq 1 ]] && write_service_pdirect
-  [[ "$RUN_PX" -eq 1 ]] && write_service_proxy
+  write_services_by_target
   [[ "${RUN_BAD:-0}" -eq 1 ]] && { write_badvpn_env_default; write_service_badvpn; }
 
   daemon_reload
   enable_start_noblock
   persist_state
-
   ok "Instalación/actualización completada."
 }
 
-do_stop_all(){
-  systemctl stop "$PD_SVC" 2>/dev/null || true
-  systemctl stop "$PX_SVC" 2>/dev/null || true
-  systemctl stop "$BAD_SVC" 2>/dev/null || true
-  ok "Servicios detenidos."
-}
-
-do_start_all(){
-  systemctl start --no-block "$PD_SVC" 2>/dev/null || true
-  systemctl start --no-block "$PX_SVC" 2>/dev/null || true
-  systemctl start --no-block "$BAD_SVC" 2>/dev/null || true
-  ok "Servicios iniciados."
-}
-
-do_restart_all(){
-  systemctl restart --no-block "$PD_SVC" 2>/dev/null || true
-  systemctl restart --no-block "$PX_SVC" 2>/dev/null || true
-  systemctl restart --no-block "$BAD_SVC" 2>/dev/null || true
-  ok "Servicios reiniciados."
-}
+do_stop_all(){ systemctl stop "$PD_SVC" 2>/dev/null || true; systemctl stop "$PX_SVC" 2>/dev/null || true; systemctl stop "$BAD_SVC" 2>/dev/null || true; ok "Servicios detenidos."; }
+do_start_all(){ systemctl start --no-block "$PD_SVC" 2>/dev/null || true; systemctl start --no-block "$PX_SVC" 2>/dev/null || true; systemctl start --no-block "$BAD_SVC" 2>/dev/null || true; ok "Servicios iniciados."; }
+do_restart_all(){ systemctl restart --no-block "$PD_SVC" 2>/dev/null || true; systemctl restart --no-block "$PX_SVC" 2>/dev/null || true; systemctl restart --no-block "$BAD_SVC" 2>/dev/null || true; ok "Servicios reiniciados."; }
 
 badvpn_set_port(){
   local current; current="$(badvpn_port_current)"
@@ -646,8 +682,8 @@ menu(){
     show_status
 
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "[1] 🛠️  Instalar / Actualizar (pisa PD/proxy, sin backups repetidos)"
-    echo "[2] 🔓 Liberar puertos 80/443 (detener servicios que bloqueen)"
+    echo "[1] 🛠️  Instalar / Actualizar (services por sistema, rutas correctas)"
+    echo "[2] 🔓 Liberar puertos 80/443"
     echo "[3] ⛔  Detener TODO"
     echo "[4] ▶️  Reanudar TODO"
     echo "[5] 🔄 Reiniciar TODO"
