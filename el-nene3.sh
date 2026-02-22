@@ -47,6 +47,7 @@ has_cmd(){ command -v "$1" >/dev/null 2>&1; }
 press_enter(){ echo; read -r -p "Presioná ENTER para volver al menú..." _; }
 need_root(){ [[ "${EUID:-$(id -u)}" -eq 0 ]] || die "Ejecutá como root: sudo bash $0"; }
 
+# runner: siempre vuelve al menú
 run_step(){
   local title="$1"; shift || true
   echo; echo "▶️  $title"
@@ -58,6 +59,7 @@ run_step(){
   press_enter
 }
 
+# Backup ÚNICO (para binarios/servicios) => evita miles de backups
 backup_once(){
   local f="$1"
   [[ -f "$f" ]] || return 0
@@ -77,7 +79,6 @@ ensure_deps(){
   if ! has_cmd netstat && ! has_cmd ss; then
     warn "No encuentro netstat ni ss. Para ver puertos: sudo apt-get install -y net-tools (o iproute2)."
   fi
-  has_cmd ufw || true
 }
 
 install_commands(){
@@ -93,7 +94,7 @@ EOF
   chmod +x "$CMD2"
 }
 
-# ---------- MAPA: DEST ----------
+# ---------------- RUTAS EXACTAS ----------------
 pick_target(){
   echo "==============================================="
   echo " $APP_NAME"
@@ -136,6 +137,7 @@ ask_components(){
   [[ "$enable_bad" =~ ^[sS]$ ]] && RUN_BAD=1 || RUN_BAD=0
 }
 
+# ---------------- state ----------------
 persist_state(){
   mkdir -p "$STATE_DIR"
   cat > "$STATE_FILE" <<EOF
@@ -156,6 +158,7 @@ load_state(){
   return 1
 }
 
+# ---------------- downloads ----------------
 download_asset(){
   local name="$1"
   local url="${RAW_BASE}/files/${name}"
@@ -175,7 +178,7 @@ ensure_assets(){
   fi
 }
 
-# Pisa siempre (sin backups repetidos de .py)
+# ✅ Pisa siempre (sin backups repetidos de .py)
 copy_files(){
   echo
   echo "📁 Destino (service path): $DEST"
@@ -245,9 +248,33 @@ free_ports_80_443(){
   fi
 }
 
-# ====== SERVICES POR SISTEMA (exactos a tus plantillas) ======
+# ====== SERVICES POR SISTEMA (EXACTOS A LO QUE PEGASTE) ======
+# Nota: Para SSHPLUS proxy y pdirect ambos usan screen session "PDirect"
+# porque así lo tenés probado.
 write_services_by_target(){
   case "$TARGET" in
+    VPS-MX)
+      if [[ "${RUN_PD:-0}" -eq 1 ]]; then
+        local svc="$SYSTEMD_DIR/$PD_SVC"
+        backup_once "$svc"
+        cat > "$svc" <<EOF
+[Unit]
+Description=Ejecutar PDirect en una sesión de screen
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/screen -DmS PDirect python ${DEST}/PDirect.py
+WorkingDirectory=${DEST}
+User=root
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        ok "Servicio PDirect (VPS-MX) listo."
+      fi
+      ;;
     SSHPLUS)
       if [[ "${RUN_PX:-0}" -eq 1 ]]; then
         local svc="$SYSTEMD_DIR/$PX_SVC"
@@ -258,7 +285,7 @@ Description=Ejecutar proxy en una sesión de screen
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/screen -DmS Proxy /usr/bin/python3 ${DEST}/proxy.py
+ExecStart=/usr/bin/screen -DmS PDirect /usr/bin/python3 ${DEST}/proxy.py
 WorkingDirectory=${DEST}
 User=root
 Restart=on-failure
@@ -267,6 +294,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+        ok "Servicio proxy (SSHPLUS) listo."
       fi
 
       if [[ "${RUN_PD:-0}" -eq 1 ]]; then
@@ -287,27 +315,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-      fi
-      ;;
-    VPS-MX)
-      if [[ "${RUN_PD:-0}" -eq 1 ]]; then
-        local svc="$SYSTEMD_DIR/$PD_SVC"
-        backup_once "$svc"
-        cat > "$svc" <<EOF
-[Unit]
-Description=Ejecutar PDirect en una sesión de screen
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/screen -DmS PDirect python ${DEST}/PDirect.py
-WorkingDirectory=${DEST}
-User=root
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
+        ok "Servicio PDirect (SSHPLUS) listo."
       fi
       ;;
     ADMRufu)
@@ -329,6 +337,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+        ok "Servicio PDirect (ADMRufu) listo."
       fi
       ;;
     VPS-AGN)
@@ -349,9 +358,11 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
+        ok "Servicio PDirect (VPS-AGN) listo."
       fi
       ;;
     LATAM)
+      # Si tu LATAM usa otra plantilla distinta, la ajustamos.
       if [[ "${RUN_PD:-0}" -eq 1 ]]; then
         local svc="$SYSTEMD_DIR/$PD_SVC"
         backup_once "$svc"
@@ -370,11 +381,13 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+        ok "Servicio PDirect (LATAM) listo."
       fi
       ;;
   esac
 }
 
+# ---- BadVPN ----
 write_badvpn_env_default(){
   mkdir -p /etc/default
   [[ -f "$BAD_ENV" ]] || echo "BADVPN_PORT=${BAD_DEFAULT_PORT}" > "$BAD_ENV"
@@ -488,7 +501,7 @@ show_status(){
   echo
 }
 
-# LOGS: FIX DEFINITIVO (usa systemctl cat)
+# LOGS: FIX definitivo (systemctl cat)
 unit_exists(){
   systemctl cat "$1" >/dev/null 2>&1
 }
