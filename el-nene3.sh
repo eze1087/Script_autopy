@@ -1,24 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ==========================================================
-#  El NeNe 3.0 – Script Automatizado de Redireccionamiento
-#  PDirect.py + proxy.py + BadVPN UDPGW
-#
-#  ✅ systemd + screen (como manual)
-#  ✅ FIX timeout: Type=oneshot + RemainAfterExit=yes + ExecStop
-#  ✅ NO pregunta puertos de PDirect/proxy (están dentro del .py)
-#  ✅ BadVPN: 7300 por defecto (editable desde menú)
-#  ✅ Descarga assets desde GitHub raw (files/)
-#  ✅ Estado guardado: /var/lib/nene3/target.conf
-#  ✅ Comandos instalados: pdmenu y automenu
-#  ✅ Opción firewall UFW: permitir puertos PDirect/proxy + SSH
-#  ✅ Opción habilitar/deshabilitar autostart (enable/disable)
-# ==========================================================
-
 APP_NAME="El NeNe 3.0 – Redireccionamiento de Puertos"
 
-# Si se ejecuta por pipe, stdin puede no ser TTY; usamos teclado real:
+# Siempre agarrar teclado real si viene por pipe
 if [[ ! -t 0 ]] && [[ -r /dev/tty ]]; then
   exec </dev/tty
 fi
@@ -84,9 +69,20 @@ ensure_deps(){
   has_cmd systemctl || die "No encuentro systemctl (systemd)."
   has_cmd curl || die "Falta curl: sudo apt-get install -y curl"
   has_cmd screen || die "Falta screen: sudo apt-get update && sudo apt-get install -y screen"
-  if ! has_cmd netstat && ! has_cmd ss; then
-    warn "No encuentro netstat ni ss. Para ver puertos OPEN/CLOSED: sudo apt-get install -y net-tools (o iproute2)."
-  fi
+}
+
+install_commands(){
+  # Se instala SIEMPRE (aunque no instales servicios)
+  cat > "$CMD1" <<EOF
+#!/usr/bin/env bash
+rm -f /tmp/el-nene3.sh
+curl -fsSL "${RAW_BASE}/el-nene3.sh" -o /tmp/el-nene3.sh
+chmod +x /tmp/el-nene3.sh
+sudo /tmp/el-nene3.sh
+EOF
+  chmod +x "$CMD1"
+  cp -f "$CMD1" "$CMD2"
+  chmod +x "$CMD2"
 }
 
 pick_target(){
@@ -173,7 +169,7 @@ ensure_assets(){
 copy_files(){
   echo
   echo "📁 Destino: $DEST"
-  mkdir -p "$DEST"
+  mkdir -p "$DEST"   # <-- CREA carpeta si no existe SIEMPRE
 
   backup_if_exists "$DEST/PDirect.py"
   backup_if_exists "$DEST/proxy.py"
@@ -193,7 +189,6 @@ copy_files(){
   fi
 }
 
-# FIX screen + systemd (sin timeout)
 write_service_pdirect(){
   local svc="$SYSTEMD_DIR/$PD_SVC"
   backup_if_exists "$svc"
@@ -274,26 +269,18 @@ EOF
 
 daemon_reload(){ systemctl daemon-reload >/dev/null 2>&1 || true; }
 
-enable_start(){
-  [[ "$RUN_PD" -eq 1 ]] && systemctl enable --now "$PD_SVC" >/dev/null 2>&1 || true
-  [[ "$RUN_PX" -eq 1 ]] && systemctl enable --now "$PX_SVC" >/dev/null 2>&1 || true
-  [[ "${RUN_BAD:-0}" -eq 1 ]] && systemctl enable --now "$BAD_SVC" >/dev/null 2>&1 || true
+# IMPORTANTE: start --no-block => NO SE CUELGA, SIEMPRE VUELVE AL MENÚ
+enable_start_noblock(){
+  [[ "$RUN_PD" -eq 1 ]] && systemctl enable "$PD_SVC" >/dev/null 2>&1 || true
+  [[ "$RUN_PX" -eq 1 ]] && systemctl enable "$PX_SVC" >/dev/null 2>&1 || true
+  [[ "${RUN_BAD:-0}" -eq 1 ]] && systemctl enable "$BAD_SVC" >/dev/null 2>&1 || true
+
+  [[ "$RUN_PD" -eq 1 ]] && systemctl start --no-block "$PD_SVC" >/dev/null 2>&1 || true
+  [[ "$RUN_PX" -eq 1 ]] && systemctl start --no-block "$PX_SVC" >/dev/null 2>&1 || true
+  [[ "${RUN_BAD:-0}" -eq 1 ]] && systemctl start --no-block "$BAD_SVC" >/dev/null 2>&1 || true
+
   systemctl reset-failed "$PD_SVC" >/dev/null 2>&1 || true
   systemctl reset-failed "$PX_SVC" >/dev/null 2>&1 || true
-}
-
-disable_boot(){
-  systemctl disable "$PD_SVC" >/dev/null 2>&1 || true
-  systemctl disable "$PX_SVC" >/dev/null 2>&1 || true
-  systemctl disable "$BAD_SVC" >/dev/null 2>&1 || true
-  ok "Autostart DESHABILITADO (no arranca al reinicio)."
-}
-
-enable_boot(){
-  systemctl enable "$PD_SVC" >/dev/null 2>&1 || true
-  systemctl enable "$PX_SVC" >/dev/null 2>&1 || true
-  systemctl enable "$BAD_SVC" >/dev/null 2>&1 || true
-  ok "Autostart HABILITADO (arranca al reinicio)."
 }
 
 svc_state(){ systemctl is-active --quiet "$1" && echo "ON" || echo "OFF"; }
@@ -307,29 +294,6 @@ badvpn_port_current(){
     [[ -n "$v" ]] && port="$v"
   fi
   echo "$port"
-}
-
-# Puertos reales por netstat/ss
-list_listen_ports(){
-  if has_cmd netstat; then
-    netstat -tnpl 2>/dev/null | awk '$6=="LISTEN"{print $4,$7}' || true
-  elif has_cmd ss; then
-    ss -lntp 2>/dev/null | awk '{print $4,$6}' || true
-  else
-    echo ""
-  fi
-}
-
-port_open(){
-  local port="$1"
-  [[ -n "$port" ]] || { echo "?"; return; }
-  if has_cmd netstat; then
-    netstat -tnpl 2>/dev/null | awk '{print $4,$6}' | grep -qE "[:.]${port}[[:space:]]+LISTEN$" && echo "OPEN" || echo "CLOSED"
-  elif has_cmd ss; then
-    ss -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}$" && echo "OPEN" || echo "CLOSED"
-  else
-    echo "?"
-  fi
 }
 
 get_default_host(){
@@ -355,114 +319,23 @@ show_status(){
   echo "📁 Ruta:   $DEST"
   echo "➡️  Destino (DEFAULT_HOST): $(get_default_host "$DEST/PDirect.py")"
   echo
-
   echo "PDirect: $(svc_state "$PD_SVC") | $(svc_enabled "$PD_SVC")"
   echo "proxy:   $(svc_state "$PX_SVC") | $(svc_enabled "$PX_SVC")"
-
   if systemctl list-unit-files 2>/dev/null | grep -q "^${BAD_SVC}"; then
     local bp
     bp="$(badvpn_port_current)"
-    echo "BadVPN:  $(svc_state "$BAD_SVC") | $(svc_enabled "$BAD_SVC") | port: 127.0.0.1:${bp} ($(port_open "$bp"))"
+    echo "BadVPN:  $(svc_state "$BAD_SVC") | $(svc_enabled "$BAD_SVC") | port: 127.0.0.1:${bp}"
   else
     echo "BadVPN:  NO INSTALADO"
   fi
-
-  echo
-  echo "📡 Puertos LISTEN actuales:"
-  list_listen_ports | head -n 20
   echo
 }
 
-install_commands(){
-  cat > "$CMD1" <<EOF
-#!/usr/bin/env bash
-rm -f /tmp/el-nene3.sh
-curl -fsSL "${RAW_BASE}/el-nene3.sh" -o /tmp/el-nene3.sh
-chmod +x /tmp/el-nene3.sh
-sudo /tmp/el-nene3.sh
-EOF
-  chmod +x "$CMD1"
-  cp -f "$CMD1" "$CMD2"
-  chmod +x "$CMD2"
-  ok "Comandos instalados: pdmenu y automenu"
-}
-
-# -------- Firewall (UFW) --------
-ensure_ufw(){
-  if ! has_cmd ufw; then
-    warn "No tenés ufw. Instalando..."
-    apt-get update -y >/dev/null 2>&1 || true
-    apt-get install -y ufw >/dev/null 2>&1 || die "No pude instalar ufw."
-  fi
-}
-
-ufw_allow_common(){
-  ensure_ufw
-  ufw allow 22/tcp >/dev/null 2>&1 || true
-}
-
-ufw_allow_port(){
-  local port="$1"
-  [[ -n "$port" ]] || return 0
-  ensure_ufw
-  ufw allow "${port}/tcp" >/dev/null 2>&1 || true
-}
-
-firewall_menu(){
-  need_root
-  ensure_ufw
-  echo
-  echo "Firewall (UFW):"
-  echo "  1) Permitir SSH (22) + habilitar UFW"
-  echo "  2) Permitir puertos de PDirect/proxy (detectados en LISTEN) + habilitar UFW"
-  echo "  3) Ver estado UFW"
-  echo "  4) Deshabilitar UFW"
-  read -r -p "Opción: " f
-
-  case "$f" in
-    1)
-      ufw_allow_common
-      ufw --force enable >/dev/null 2>&1 || true
-      ok "UFW habilitado y SSH permitido."
-      ;;
-    2)
-      ufw_allow_common
-      # Permitimos TODO lo que esté LISTEN en 0.0.0.0 o ::: (excluimos 127.0.0.1)
-      local ports
-      if has_cmd netstat; then
-        ports="$(netstat -tnpl 2>/dev/null | awk '$6=="LISTEN" && ($4 ~ /^0\.0\.0\.0:/ || $4 ~ /^:::/){print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq)"
-      elif has_cmd ss; then
-        ports="$(ss -lnt 2>/dev/null | awk '$4 ~ /^0\.0\.0\.0:/ || $4 ~ /^:::/ {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq)"
-      else
-        ports=""
-      fi
-
-      for p in $ports; do
-        ufw_allow_port "$p"
-      done
-
-      ufw --force enable >/dev/null 2>&1 || true
-      ok "UFW habilitado. Puertos permitidos: $ports"
-      ;;
-    3)
-      ufw status verbose || true
-      ;;
-    4)
-      ufw disable || true
-      ok "UFW deshabilitado."
-      ;;
-    *)
-      echo "Opción inválida."
-      ;;
-  esac
-
-  press_enter
-}
-
-# -------- Actions --------
 do_install(){
   need_root
   ensure_deps
+  install_commands   # <-- SIEMPRE deja pdmenu/automenu instalados
+
   pick_target
   ask_components
 
@@ -478,9 +351,8 @@ do_install(){
   fi
 
   daemon_reload
-  enable_start
+  enable_start_noblock   # <-- NO BLOQUEA
   persist_state
-  install_commands
 
   ok "Instalación/actualización completada."
   show_status
@@ -498,40 +370,37 @@ do_stop_all(){
 
 do_start_all(){
   need_root
-  systemctl start "$PD_SVC" 2>/dev/null || true
-  systemctl start "$PX_SVC" 2>/dev/null || true
-  systemctl start "$BAD_SVC" 2>/dev/null || true
+  systemctl start --no-block "$PD_SVC" 2>/dev/null || true
+  systemctl start --no-block "$PX_SVC" 2>/dev/null || true
+  systemctl start --no-block "$BAD_SVC" 2>/dev/null || true
   ok "Servicios iniciados."
   press_enter
 }
 
 do_restart_all(){
   need_root
-  systemctl restart "$PD_SVC" 2>/dev/null || true
-  systemctl restart "$PX_SVC" 2>/dev/null || true
-  systemctl restart "$BAD_SVC" 2>/dev/null || true
+  systemctl restart --no-block "$PD_SVC" 2>/dev/null || true
+  systemctl restart --no-block "$PX_SVC" 2>/dev/null || true
+  systemctl restart --no-block "$BAD_SVC" 2>/dev/null || true
   ok "Servicios reiniciados."
   press_enter
 }
 
-# Logs: NO usamos -f por defecto (para que vuelva al menú)
 do_logs(){
   need_root
   echo
-  echo "Logs (últimas líneas):"
+  echo "Logs (últimas 80 líneas):"
   echo "  1) PDirect"
   echo "  2) proxy"
   echo "  3) BadVPN"
-  echo "  4) Seguir en vivo (-f) PDirect (salir con Ctrl+C)"
   read -r -p "Opción: " o
-
   case "$o" in
-    1) journalctl -u "$PD_SVC" --no-pager -n 80 || true ; press_enter ;;
-    2) journalctl -u "$PX_SVC" --no-pager -n 80 || true ; press_enter ;;
-    3) journalctl -u "$BAD_SVC" --no-pager -n 80 || true ; press_enter ;;
-    4) journalctl -u "$PD_SVC" -f || true ; press_enter ;;
-    *) echo "Opción inválida." ; press_enter ;;
+    1) journalctl -u "$PD_SVC" --no-pager -n 80 || true ;;
+    2) journalctl -u "$PX_SVC" --no-pager -n 80 || true ;;
+    3) journalctl -u "$BAD_SVC" --no-pager -n 80 || true ;;
+    *) echo "Opción inválida." ;;
   esac
+  press_enter
 }
 
 badvpn_set_port(){
@@ -545,7 +414,7 @@ badvpn_set_port(){
   echo "BADVPN_PORT=${np}" > "$BAD_ENV"
   chmod 644 "$BAD_ENV"
   daemon_reload
-  systemctl restart "$BAD_SVC" 2>/dev/null || true
+  systemctl restart --no-block "$BAD_SVC" 2>/dev/null || true
   ok "BadVPN reiniciado en puerto ${np}."
   press_enter
 }
@@ -566,6 +435,9 @@ do_uninstall(){
 
 menu(){
   need_root
+  ensure_deps
+  install_commands  # <-- deja pdmenu/automenu SIEMPRE disponibles
+
   while true; do
     echo
     echo "╔══════════════════════════════════════════════╗"
@@ -582,9 +454,6 @@ menu(){
     echo "[5] 📜 Ver logs"
     echo "[6] 🧨 Desinstalar servicios"
     echo "[7] 🔧 Cambiar puerto BadVPN (default 7300)"
-    echo "[8] 🛡️  Firewall UFW (permitir puertos)"
-    echo "[9] ✅ Habilitar autostart al reinicio (systemctl enable)"
-    echo "[10] ⛔ Deshabilitar autostart (systemctl disable)"
     echo "[0] Salir"
     echo
     read -r -p "Opción: " op
@@ -596,9 +465,6 @@ menu(){
       5) do_logs ;;
       6) do_uninstall ;;
       7) badvpn_set_port ;;
-      8) firewall_menu ;;
-      9) enable_boot ; press_enter ;;
-      10) disable_boot ; press_enter ;;
       0) exit 0 ;;
       *) echo "Opción inválida." ;;
     esac
