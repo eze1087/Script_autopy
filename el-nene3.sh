@@ -3,13 +3,20 @@ set -euo pipefail
 
 # ==========================================================
 #  El NeNe 3.0 – Script Automatizado de Redireccionamiento
-#  - Modo manual-compatible: systemd + screen -DmS
-#  - NO pregunta puertos de PDirect/proxy (ya están en el .py)
+#  - systemd + screen -DmS (como tu método manual)
+#  - NO pregunta puertos de PDirect/proxy (están dentro del .py)
 #  - BadVPN: 7300 por defecto (editable desde menú)
 #  - One-liner friendly: descarga assets desde GitHub raw
+#  - Menú muestra ON/OFF + puertos OPEN/CLOSED
 # ==========================================================
 
 APP_NAME="El NeNe 3.0 – Redireccionamiento de Puertos"
+
+# Si se ejecuta por pipe (curl | bash), stdin no es TTY.
+# Forzamos lectura del teclado para que el menú funcione siempre.
+if [[ ! -t 0 ]] && [[ -r /dev/tty ]]; then
+  exec </dev/tty
+fi
 
 # ==== TU REPO ====
 GITHUB_USER="eze1087"
@@ -46,6 +53,11 @@ die(){ echo "❌ $*"; exit 1; }
 ok(){ echo "✅ $*"; }
 warn(){ echo "⚠️  $*"; }
 
+press_enter(){
+  echo
+  read -r -p "Presioná ENTER para volver al menú..." _
+}
+
 need_root(){
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     die "Ejecutá como root: sudo bash $0"
@@ -66,6 +78,7 @@ ensure_deps(){
   command -v systemctl >/dev/null 2>&1 || die "No encuentro systemctl (systemd)."
   command -v curl >/dev/null 2>&1 || die "Falta curl (sudo apt-get install -y curl)"
   command -v screen >/dev/null 2>&1 || die "Falta screen (sudo apt-get update && sudo apt-get install -y screen)"
+  command -v ss >/dev/null 2>&1 || warn "No encuentro 'ss' (iproute2). Para ver puertos OPEN/CLOSED instalá: apt-get install -y iproute2"
 }
 
 pick_target(){
@@ -109,16 +122,8 @@ ask_components(){
   enable_bad="${enable_bad:-s}"
   if [[ "$enable_bad" =~ ^[sS]$ ]]; then
     RUN_BAD=1
-    # Por defecto 7300, podés cambiar luego en menú
-    if [[ -f "$BAD_ENV" ]]; then
-      BAD_PORT="$(grep -E '^BADVPN_PORT=' "$BAD_ENV" | cut -d= -f2 | tr -d '[:space:]' || true)"
-      BAD_PORT="${BAD_PORT:-$BAD_DEFAULT_PORT}"
-    else
-      BAD_PORT="$BAD_DEFAULT_PORT"
-    fi
   else
     RUN_BAD=0
-    BAD_PORT=""
   fi
 }
 
@@ -147,7 +152,6 @@ download_asset(){
   local url="${RAW_BASE}/files/${name}"
   local out="${DL_DIR}/${name}"
   mkdir -p "$DL_DIR"
-  # IMPORTANTE: esto va a STDERR para no romper variables
   echo "⬇️  Descargando ${name}..." >&2
   curl -fsSL "$url" -o "$out" || die "No pude descargar: $url"
   echo "$out"
@@ -165,7 +169,7 @@ ensure_assets(){
 copy_files(){
   echo
   echo "📁 Destino: $DEST"
-  mkdir -p "$DEST"  # crea si no existe
+  mkdir -p "$DEST"
 
   backup_if_exists "$DEST/PDirect.py"
   backup_if_exists "$DEST/proxy.py"
@@ -190,7 +194,6 @@ write_service_pdirect(){
   local svc="$SYSTEMD_DIR/$PD_SVC"
   backup_if_exists "$svc"
 
-  # Igual que tu método manual: screen -DmS
   cat > "$svc" <<EOF
 [Unit]
 Description=El NeNe 3.0 - PDirect (${TARGET}) via screen
@@ -214,7 +217,6 @@ write_service_proxy(){
   local svc="$SYSTEMD_DIR/$PX_SVC"
   backup_if_exists "$svc"
 
-  # Igual que tu método manual: screen -DmS
   cat > "$svc" <<EOF
 [Unit]
 Description=El NeNe 3.0 - proxy (${TARGET}) via screen
@@ -234,22 +236,22 @@ EOF
   ok "Servicio creado: $PX_SVC"
 }
 
-write_badvpn_env(){
+write_badvpn_env_default(){
   mkdir -p /etc/default
-  local port="${BAD_DEFAULT_PORT}"
   if [[ -f "$BAD_ENV" ]]; then
-    local v
-    v="$(grep -E '^BADVPN_PORT=' "$BAD_ENV" | cut -d= -f2 | tr -d '[:space:]' || true)"
-    port="${v:-$BAD_DEFAULT_PORT}"
+    # ya existe => lo respetamos
+    ok "BadVPN env ya existe: $BAD_ENV (lo respeto)"
+    return
   fi
-  echo "BADVPN_PORT=${port}" > "$BAD_ENV"
+  echo "BADVPN_PORT=${BAD_DEFAULT_PORT}" > "$BAD_ENV"
   chmod 644 "$BAD_ENV"
-  ok "BadVPN env listo (puerto=${port})"
+  ok "BadVPN env creado (puerto=${BAD_DEFAULT_PORT})"
 }
 
 write_service_badvpn(){
   local svc="$SYSTEMD_DIR/$BAD_SVC"
   backup_if_exists "$svc"
+
   cat > "$svc" <<EOF
 [Unit]
 Description=El NeNe 3.0 - BadVPN UDPGW
@@ -270,12 +272,15 @@ EOF
   ok "Servicio creado: $BAD_SVC"
 }
 
-daemon_reload(){ systemctl daemon-reload; }
+daemon_reload(){
+  systemctl daemon-reload >/dev/null 2>&1 || true
+}
 
 enable_start(){
-  [[ "$RUN_PD" -eq 1 ]] && systemctl enable --now "$PD_SVC"
-  [[ "$RUN_PX" -eq 1 ]] && systemctl enable --now "$PX_SVC"
-  [[ "${RUN_BAD:-0}" -eq 1 ]] && systemctl enable --now "$BAD_SVC"
+  # Silenciamos output (symlinks) para que no parezca que “se colgó”
+  [[ "$RUN_PD" -eq 1 ]] && systemctl enable --now "$PD_SVC" >/dev/null 2>&1 || true
+  [[ "$RUN_PX" -eq 1 ]] && systemctl enable --now "$PX_SVC" >/dev/null 2>&1 || true
+  [[ "${RUN_BAD:-0}" -eq 1 ]] && systemctl enable --now "$BAD_SVC" >/dev/null 2>&1 || true
 }
 
 svc_state(){ systemctl is-active --quiet "$1" && echo "ON" || echo "OFF"; }
@@ -289,6 +294,31 @@ badvpn_port_current(){
     [[ -n "$v" ]] && port="$v"
   fi
   echo "$port"
+}
+
+# screen session pid helper
+screen_pid(){
+  local name="$1"
+  screen -ls 2>/dev/null | awk -v n="$name" '$0 ~ n {print $1}' | head -n1 | cut -d. -f1
+}
+
+# Detecta puerto simple desde el código (si el script define algo tipo PORT=80, port=80, listen_port=80)
+detect_port_from_code(){
+  local f="$1"
+  [[ -f "$f" ]] || { echo "?"; return; }
+  local p
+  p="$(grep -Eoi '(listen_)?port[[:space:]]*=[[:space:]]*[0-9]{2,5}' "$f" 2>/dev/null | head -n1 | grep -Eo '[0-9]{2,5}' || true)"
+  [[ -n "$p" ]] && echo "$p" || echo "?"
+}
+
+port_state(){
+  local port="$1"
+  command -v ss >/dev/null 2>&1 || { echo "?"; return; }
+  if ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}$"; then
+    echo "OPEN"
+  else
+    echo "CLOSED"
+  fi
 }
 
 get_default_host(){
@@ -315,11 +345,25 @@ show_status(){
   echo "➡️  Destino (DEFAULT_HOST): $(get_default_host "$DEST/PDirect.py")"
   echo
 
-  echo "PDirect: $(svc_state "$PD_SVC") | $(svc_enabled "$PD_SVC")"
-  echo "proxy:   $(svc_state "$PX_SVC") | $(svc_enabled "$PX_SVC")"
+  local pd_port px_port bad_port
+  pd_port="$(detect_port_from_code "$DEST/PDirect.py")"
+  px_port="$(detect_port_from_code "$DEST/proxy.py")"
+  bad_port="$(badvpn_port_current)"
 
-  if systemctl list-unit-files | grep -q "^${BAD_SVC}"; then
-    echo "BadVPN:  $(svc_state "$BAD_SVC") | $(svc_enabled "$BAD_SVC") | port: 127.0.0.1:$(badvpn_port_current)"
+  local pd_open px_open bad_open
+  pd_open="$( [[ "$pd_port" != "?" ]] && port_state "$pd_port" || echo "?" )"
+  px_open="$( [[ "$px_port" != "?" ]] && port_state "$px_port" || echo "?" )"
+  bad_open="$(port_state "$bad_port")"
+
+  local pd_pid px_pid
+  pd_pid="$(screen_pid "PDirect")"
+  px_pid="$(screen_pid "Proxy")"
+
+  echo "PDirect: $(svc_state "$PD_SVC") | $(svc_enabled "$PD_SVC") | screenPID: ${pd_pid:-"-"} | port: ${pd_port} (${pd_open})"
+  echo "proxy:   $(svc_state "$PX_SVC") | $(svc_enabled "$PX_SVC") | screenPID: ${px_pid:-"-"} | port: ${px_port} (${px_open})"
+
+  if systemctl list-unit-files 2>/dev/null | grep -q "^${BAD_SVC}"; then
+    echo "BadVPN:  $(svc_state "$BAD_SVC") | $(svc_enabled "$BAD_SVC") | port: 127.0.0.1:${bad_port} (${bad_open})"
   else
     echo "BadVPN:  NO INSTALADO"
   fi
@@ -329,7 +373,7 @@ show_status(){
 install_global_cmd(){
   cat > "$GLOBAL_CMD" <<EOF
 #!/usr/bin/env bash
-curl -fsSL "${RAW_BASE}/el-nene3.sh" | sudo bash
+sudo bash <(curl -fsSL "${RAW_BASE}/el-nene3.sh")
 EOF
   chmod +x "$GLOBAL_CMD"
   ok "Comando global instalado: nene3"
@@ -348,7 +392,7 @@ do_install(){
   [[ "$RUN_PX" -eq 1 ]] && write_service_proxy
 
   if [[ "${RUN_BAD:-0}" -eq 1 ]]; then
-    write_badvpn_env
+    write_badvpn_env_default
     write_service_badvpn
   fi
 
@@ -359,6 +403,7 @@ do_install(){
 
   ok "Instalación/actualización completada."
   show_status
+  press_enter
 }
 
 do_stop_all(){
@@ -367,6 +412,7 @@ do_stop_all(){
   systemctl stop "$PX_SVC" 2>/dev/null || true
   systemctl stop "$BAD_SVC" 2>/dev/null || true
   ok "Servicios detenidos."
+  press_enter
 }
 
 do_start_all(){
@@ -375,6 +421,7 @@ do_start_all(){
   systemctl start "$PX_SVC" 2>/dev/null || true
   systemctl start "$BAD_SVC" 2>/dev/null || true
   ok "Servicios iniciados."
+  press_enter
 }
 
 do_restart_all(){
@@ -383,6 +430,7 @@ do_restart_all(){
   systemctl restart "$PX_SVC" 2>/dev/null || true
   systemctl restart "$BAD_SVC" 2>/dev/null || true
   ok "Servicios reiniciados."
+  press_enter
 }
 
 do_logs(){
@@ -414,6 +462,7 @@ badvpn_set_port(){
   daemon_reload
   systemctl restart "$BAD_SVC" 2>/dev/null || true
   ok "BadVPN reiniciado en puerto ${np}."
+  press_enter
 }
 
 do_uninstall(){
@@ -427,6 +476,7 @@ do_uninstall(){
   rm -f "$SYSTEMD_DIR/$PD_SVC" "$SYSTEMD_DIR/$PX_SVC" "$SYSTEMD_DIR/$BAD_SVC"
   daemon_reload
   ok "Servicios removidos (no borro los .py ni /bin/badvpn-udpgw)."
+  press_enter
 }
 
 menu(){
