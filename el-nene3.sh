@@ -200,17 +200,40 @@ Description=El NeNe 3.0 - PDirect (${TARGET}) via screen
 After=network.target
 
 [Service]
-Type=forking
+Type=oneshot
+RemainAfterExit=yes
 WorkingDirectory=${DEST}
 ExecStart=/usr/bin/screen -DmS PDirect /usr/bin/python3 ${DEST}/PDirect.py
+ExecStop=/usr/bin/screen -S PDirect -X quit
 User=root
-Restart=on-failure
-RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
 EOF
   ok "Servicio creado: $PD_SVC"
+}
+
+write_service_proxy(){
+  local svc="$SYSTEMD_DIR/$PX_SVC"
+  backup_if_exists "$svc"
+
+  cat > "$svc" <<EOF
+[Unit]
+Description=El NeNe 3.0 - proxy (${TARGET}) via screen
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=${DEST}
+ExecStart=/usr/bin/screen -DmS Proxy /usr/bin/python3 ${DEST}/proxy.py
+ExecStop=/usr/bin/screen -S Proxy -X quit
+User=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  ok "Servicio creado: $PX_SVC"
 }
 
 write_service_proxy(){
