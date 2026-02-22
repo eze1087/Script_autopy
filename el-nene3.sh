@@ -5,27 +5,33 @@ set -euo pipefail
 #  El NeNe 3.0 – Redireccionamiento de Puertos
 #
 #  ✅ RUTAS EXACTAS (service = ruta = copia) + mkdir -p
-#  ✅ systemd + screen (como manual) + FIX timeout (oneshot)
-#  ✅ BadVPN 7300 default (editable)
-#  ✅ Descarga assets desde GitHub (/files)
+#  ✅ systemd + screen (como manual)
+#  ✅ FIX timeout definitivo: oneshot + RemainAfterExit + ExecStartPre + TimeoutStartSec
+#  ✅ NO pregunta puertos de PDirect/proxy (se editan en el .py)
+#  ✅ BadVPN: 7300 por defecto (editable)
+#  ✅ Descarga assets desde GitHub raw (files/)
 #  ✅ Guarda estado /var/lib/nene3/target.conf
-#  ✅ Comandos: pdmenu / automenu
-#  ✅ Firewall UFW / Autostart enable-disable
+#  ✅ Comandos instalados: pdmenu / automenu
+#  ✅ Firewall UFW + Autostart enable/disable
 #  ✅ STATUS REAL: screen + LISTEN (netstat/ss)
-#  ✅ NUEVO: opción menú para editar PDirect.py y proxy.py (nano)
+#  ✅ Editar manual: nano PDirect/proxy desde menú
+#  ✅ LIBERAR PUERTO 80/443: detiene servicios web que bloqueen tu PDirect
 # ==========================================================
 
 APP_NAME="El NeNe 3.0 – Redireccionamiento de Puertos"
 
+# stdin por pipe => usar teclado real
 if [[ ! -t 0 ]] && [[ -r /dev/tty ]]; then
   exec </dev/tty
 fi
 
+# ==== TU REPO ====
 GITHUB_USER="eze1087"
 GITHUB_REPO="Script_autopy"
 GITHUB_BRANCH="main"
 RAW_BASE="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
+# Assets en repo (/files)
 PD_FILE="PDirect.py"
 PX_FILE="proxy.py"
 BAD_FILE="badvpn-udpgw"
@@ -36,6 +42,7 @@ SYSTEMD_DIR="/etc/systemd/system"
 PD_SVC="pdirect.service"
 PX_SVC="proxy.service"
 
+# BadVPN
 BAD_SVC="badvpn-udpgw.service"
 BAD_BIN="/bin/badvpn-udpgw"
 BAD_WRAPPER="/bin/antcrashvpn.sh"
@@ -48,6 +55,7 @@ STATE_FILE="${STATE_DIR}/target.conf"
 CMD1="/usr/local/bin/pdmenu"
 CMD2="/usr/local/bin/automenu"
 
+# -------- helpers --------
 ts(){ date +"%Y%m%d%H%M%S"; }
 die(){ echo "❌ $*"; exit 1; }
 ok(){ echo "✅ $*"; }
@@ -133,6 +141,7 @@ ask_components(){
   [[ "$enable_bad" =~ ^[sS]$ ]] && RUN_BAD=1 || RUN_BAD=0
 }
 
+# -------- state --------
 persist_state(){
   mkdir -p "$STATE_DIR"
   cat > "$STATE_FILE" <<EOF
@@ -153,6 +162,7 @@ load_state(){
   return 1
 }
 
+# -------- downloads --------
 download_asset(){
   local name="$1"
   local url="${RAW_BASE}/files/${name}"
@@ -172,7 +182,7 @@ ensure_assets(){
   fi
 }
 
-# Crea carpeta SIEMPRE y copia en la misma ruta que usa el service
+# -------- copy/install (DEST SIEMPRE CREADO) --------
 copy_files(){
   echo
   echo "📁 Destino (service path): $DEST"
@@ -196,6 +206,72 @@ copy_files(){
   fi
 }
 
+# -------- PORT FREE (80/443) --------
+listener_prog_on_port(){
+  local port="$1"
+  if has_cmd netstat; then
+    # returns "PID/NAME" if found
+    netstat -tnpl 2>/dev/null | awk -v p=":${port}" '$6=="LISTEN" && $4 ~ p {print $7}' | head -n1
+  elif has_cmd ss; then
+    # best-effort: extract process name
+    ss -lntp 2>/dev/null | awk -v p=":${port}" '$4 ~ p {print $0}' | head -n1
+  else
+    echo ""
+  fi
+}
+
+stop_common_web_services(){
+  # Detiene servicios típicos que ocupan 80/443
+  local svc
+  for svc in apache2 nginx httpd lighttpd caddy haproxy; do
+    systemctl is-active --quiet "$svc" 2>/dev/null && {
+      warn "Deteniendo servicio que puede ocupar 80/443: $svc"
+      systemctl stop "$svc" 2>/dev/null || true
+      systemctl disable "$svc" 2>/dev/null || true
+    }
+  done
+}
+
+free_ports_80_443(){
+  need_root
+  stop_common_web_services
+
+  local info80 info443
+  info80="$(listener_prog_on_port 80 || true)"
+  info443="$(listener_prog_on_port 443 || true)"
+
+  if [[ -n "$info80" ]]; then
+    # netstat style: "PID/name"
+    if [[ "$info80" =~ ^[0-9]+/ ]]; then
+      local pid="${info80%%/*}"
+      local name="${info80#*/}"
+      if [[ "$name" != "python3" && "$name" != "badvpn-udpgw" ]]; then
+        warn "Puerto 80 ocupado por: $info80. Intento terminar PID $pid"
+        kill "$pid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    fi
+  fi
+
+  if [[ -n "$info443" ]]; then
+    if [[ "$info443" =~ ^[0-9]+/ ]]; then
+      local pid="${info443%%/*}"
+      local name="${info443#*/}"
+      if [[ "$name" != "python3" && "$name" != "badvpn-udpgw" ]]; then
+        warn "Puerto 443 ocupado por: $info443. Intento terminar PID $pid"
+        kill "$pid" 2>/dev/null || true
+        sleep 1
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    fi
+  fi
+
+  ok "Intenté liberar puertos 80/443. Verificá con: netstat -tnpl | egrep ':80|:443'"
+  press_enter
+}
+
+# -------- services (screen + no timeout) --------
 write_service_pdirect(){
   local svc="$SYSTEMD_DIR/$PD_SVC"
   backup_if_exists "$svc"
@@ -208,11 +284,21 @@ After=network.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=${DEST}
+
+# Limpia sesión vieja
+ExecStartPre=/usr/bin/screen -S PDirect -X quit
+
+# Arranca en background y sale rápido
 ExecStart=/usr/bin/screen -DmS PDirect /usr/bin/python3 ${DEST}/PDirect.py
+
+# Stop prolijo
 ExecStop=/usr/bin/screen -S PDirect -X quit
+
+# Nunca se cuelga en start
+TimeoutStartSec=5
+TimeoutStopSec=5
+
 User=root
-Restart=on-failure
-RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
@@ -232,11 +318,15 @@ After=network.target
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=${DEST}
+
+ExecStartPre=/usr/bin/screen -S Proxy -X quit
 ExecStart=/usr/bin/screen -DmS Proxy /usr/bin/python3 ${DEST}/proxy.py
 ExecStop=/usr/bin/screen -S Proxy -X quit
+
+TimeoutStartSec=5
+TimeoutStopSec=5
+
 User=root
-Restart=on-failure
-RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
@@ -405,13 +495,11 @@ show_status(){
   echo
 }
 
-# -------- NUEVO: EDITAR MANUAL (nano) --------
+# -------- Edit manual --------
 ensure_dest_from_state(){
-  # Si no hay estado, pedimos target para conocer DEST
   if ! load_state; then
     warn "No hay instalación registrada. Elegí sistema para saber la ruta."
     pick_target
-    # No sabemos RUN_*, pero para editar solo importa DEST:
     RUN_PD=1; RUN_PX=1; RUN_BAD=0
     persist_state
   fi
@@ -421,30 +509,17 @@ ensure_dest_from_state(){
 edit_menu(){
   need_root
   ensure_dest_from_state
-
   echo
   echo "Editar redireccionamiento (manual):"
   echo "  1) Editar PDirect.py  (nano ${DEST}/PDirect.py)"
   echo "  2) Editar proxy.py    (nano ${DEST}/proxy.py)"
-  echo "  3) Abrir carpeta DEST (ls -la ${DEST})"
+  echo "  3) Ver carpeta DEST   (ls -la ${DEST})"
   echo "  0) Volver"
   read -r -p "Opción: " e
-
   case "$e" in
-    1)
-      [[ -f "${DEST}/PDirect.py" ]] || warn "No existe ${DEST}/PDirect.py (instalá primero o copiá el archivo)."
-      nano "${DEST}/PDirect.py"
-      press_enter
-      ;;
-    2)
-      [[ -f "${DEST}/proxy.py" ]] || warn "No existe ${DEST}/proxy.py (instalá primero o copiá el archivo)."
-      nano "${DEST}/proxy.py"
-      press_enter
-      ;;
-    3)
-      ls -la "${DEST}" || true
-      press_enter
-      ;;
+    1) [[ -f "${DEST}/PDirect.py" ]] || warn "No existe ${DEST}/PDirect.py (instalá primero)."; nano "${DEST}/PDirect.py"; press_enter ;;
+    2) [[ -f "${DEST}/proxy.py" ]] || warn "No existe ${DEST}/proxy.py (instalá primero)."; nano "${DEST}/proxy.py"; press_enter ;;
+    3) ls -la "${DEST}" || true; press_enter ;;
     0) return 0 ;;
     *) echo "Opción inválida."; press_enter ;;
   esac
@@ -469,7 +544,6 @@ firewall_menu(){
   echo "  3) Ver estado UFW"
   echo "  4) Deshabilitar UFW"
   read -r -p "Opción: " f
-
   case "$f" in
     1)
       ufw allow 22/tcp >/dev/null 2>&1 || true
@@ -486,9 +560,7 @@ firewall_menu(){
         ports="$(ss -lnt 2>/dev/null | awk '$4 ~ /^0\.0\.0\.0:/ || $4 ~ /^:::/ {print $4}' \
           | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq)"
       fi
-      for p in $ports; do
-        ufw allow "${p}/tcp" >/dev/null 2>&1 || true
-      done
+      for p in $ports; do ufw allow "${p}/tcp" >/dev/null 2>&1 || true; done
       ufw --force enable >/dev/null 2>&1 || true
       ok "UFW habilitado. Puertos permitidos: ${ports:-"(ninguno detectado)"}"
       ;;
@@ -511,6 +583,9 @@ do_install(){
   ensure_assets
   copy_files
 
+  # Antes de arrancar, liberamos 80/443 por si hay conflicto (sin preguntar)
+  free_ports_80_443_quiet
+
   [[ "$RUN_PD" -eq 1 ]] && write_service_pdirect
   [[ "$RUN_PX" -eq 1 ]] && write_service_proxy
   if [[ "${RUN_BAD:-0}" -eq 1 ]]; then
@@ -525,6 +600,32 @@ do_install(){
   ok "Instalación/actualización completada."
   show_status
   press_enter
+}
+
+# versión silenciosa para install (sin ENTER)
+free_ports_80_443_quiet(){
+  stop_common_web_services
+  local info80 info443
+  info80="$(listener_prog_on_port 80 || true)"
+  info443="$(listener_prog_on_port 443 || true)"
+  if [[ -n "$info80" && "$info80" =~ ^[0-9]+/ ]]; then
+    local pid="${info80%%/*}"; local name="${info80#*/}"
+    if [[ "$name" != "python3" && "$name" != "badvpn-udpgw" ]]; then
+      warn "Liberando 80 (ocupado por $info80)..."
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  fi
+  if [[ -n "$info443" && "$info443" =~ ^[0-9]+/ ]]; then
+    local pid="${info443%%/*}"; local name="${info443#*/}"
+    if [[ "$name" != "python3" && "$name" != "badvpn-udpgw" ]]; then
+      warn "Liberando 443 (ocupado por $info443)..."
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  fi
 }
 
 do_stop_all(){
@@ -625,6 +726,7 @@ menu(){
     echo "[9] ✅ Habilitar autostart al reinicio (systemctl enable)"
     echo "[10] ⛔ Deshabilitar autostart (systemctl disable)"
     echo "[11] ✏️  Editar redireccionamiento (nano PDirect/proxy)"
+    echo "[12] 🔓 Liberar puertos 80/443 (detener servicios que bloqueen)"
     echo "[0] Salir"
     echo
     read -r -p "Opción: " op
@@ -640,6 +742,7 @@ menu(){
       9) enable_boot; press_enter ;;
       10) disable_boot; press_enter ;;
       11) edit_menu ;;
+      12) free_ports_80_443 ;;
       0) exit 0 ;;
       *) echo "Opción inválida." ;;
     esac
