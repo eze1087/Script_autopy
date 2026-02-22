@@ -5,26 +5,20 @@ set -euo pipefail
 #  El NeNe 3.0 – Script Automatizado de Redireccionamiento
 #  PDirect.py + proxy.py + BadVPN UDPGW
 #
-#  ✅ Modo "manual-compatible": systemd + screen -DmS
-#  ✅ FIX systemd: Type=oneshot + RemainAfterExit (sin timeouts)
-#  ✅ NO pregunta puertos de PDirect/proxy (se editan en el .py)
+#  ✅ systemd + screen (como manual)
+#  ✅ FIX timeout: Type=oneshot + RemainAfterExit=yes + ExecStop
+#  ✅ NO pregunta puertos de PDirect/proxy (están dentro del .py)
 #  ✅ BadVPN: 7300 por defecto (editable desde menú)
 #  ✅ Descarga assets desde GitHub raw (files/)
-#  ✅ Menú muestra ON/OFF + ENABLED/DISABLED + puertos OPEN/CLOSED (netstat/ss)
-#  ✅ Siempre guarda estado: /var/lib/nene3/target.conf
-#
-#  Repo esperado:
-#   el-nene3.sh
-#   files/PDirect.py
-#   files/proxy.py
-#   files/badvpn-udpgw
-#   files/antcrashvpn.sh
+#  ✅ Estado guardado: /var/lib/nene3/target.conf
+#  ✅ Comandos instalados: pdmenu y automenu
+#  ✅ Opción firewall UFW: permitir puertos PDirect/proxy + SSH
+#  ✅ Opción habilitar/deshabilitar autostart (enable/disable)
 # ==========================================================
 
 APP_NAME="El NeNe 3.0 – Redireccionamiento de Puertos"
 
-# Si se ejecuta por pipe (curl | bash) stdin puede no ser TTY.
-# Forzamos lectura del teclado si existe /dev/tty.
+# Si se ejecuta por pipe, stdin puede no ser TTY; usamos teclado real:
 if [[ ! -t 0 ]] && [[ -r /dev/tty ]]; then
   exec </dev/tty
 fi
@@ -35,16 +29,14 @@ GITHUB_REPO="Script_autopy"
 GITHUB_BRANCH="main"
 RAW_BASE="https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/${GITHUB_BRANCH}"
 
-# Assets en repo (dentro de /files)
+# Assets en repo (/files)
 PD_FILE="PDirect.py"
 PX_FILE="proxy.py"
 BAD_FILE="badvpn-udpgw"
 WR_FILE="antcrashvpn.sh"
-
 DL_DIR="/tmp/nene3-files"
 
 SYSTEMD_DIR="/etc/systemd/system"
-
 PD_SVC="pdirect.service"
 PX_SVC="proxy.service"
 
@@ -57,13 +49,15 @@ BAD_DEFAULT_PORT="7300"
 
 STATE_DIR="/var/lib/nene3"
 STATE_FILE="${STATE_DIR}/target.conf"
-GLOBAL_CMD="/usr/local/bin/nene3"
 
-# ------------ helpers ------------
+CMD1="/usr/local/bin/pdmenu"
+CMD2="/usr/local/bin/automenu"
+
 ts(){ date +"%Y%m%d%H%M%S"; }
 die(){ echo "❌ $*"; exit 1; }
 ok(){ echo "✅ $*"; }
 warn(){ echo "⚠️  $*"; }
+has_cmd(){ command -v "$1" >/dev/null 2>&1; }
 
 press_enter(){
   echo
@@ -85,20 +79,16 @@ backup_if_exists(){
   fi
 }
 
-has_cmd(){ command -v "$1" >/dev/null 2>&1; }
-
 ensure_deps(){
   has_cmd python3 || die "Falta python3: sudo apt-get update && sudo apt-get install -y python3"
   has_cmd systemctl || die "No encuentro systemctl (systemd)."
   has_cmd curl || die "Falta curl: sudo apt-get install -y curl"
   has_cmd screen || die "Falta screen: sudo apt-get update && sudo apt-get install -y screen"
-  # netstat suele venir de net-tools; si no está, usamos ss
   if ! has_cmd netstat && ! has_cmd ss; then
-    warn "No encuentro netstat ni ss. Para ver puertos OPEN/CLOSED instalá: sudo apt-get install -y net-tools (o iproute2)."
+    warn "No encuentro netstat ni ss. Para ver puertos OPEN/CLOSED: sudo apt-get install -y net-tools (o iproute2)."
   fi
 }
 
-# ------------ target selection ------------
 pick_target(){
   echo "==============================================="
   echo " $APP_NAME"
@@ -138,14 +128,9 @@ ask_components(){
   echo
   read -r -p "¿Habilitar BadVPN UDPGW? (s/n) [s]: " enable_bad
   enable_bad="${enable_bad:-s}"
-  if [[ "$enable_bad" =~ ^[sS]$ ]]; then
-    RUN_BAD=1
-  else
-    RUN_BAD=0
-  fi
+  [[ "$enable_bad" =~ ^[sS]$ ]] && RUN_BAD=1 || RUN_BAD=0
 }
 
-# ------------ state ------------
 persist_state(){
   mkdir -p "$STATE_DIR"
   cat > "$STATE_FILE" <<EOF
@@ -166,7 +151,6 @@ load_state(){
   return 1
 }
 
-# ------------ downloads ------------
 download_asset(){
   local name="$1"
   local url="${RAW_BASE}/files/${name}"
@@ -186,7 +170,6 @@ ensure_assets(){
   fi
 }
 
-# ------------ install/copy ------------
 copy_files(){
   echo
   echo "📁 Destino: $DEST"
@@ -203,7 +186,6 @@ copy_files(){
   if [[ "${RUN_BAD:-0}" -eq 1 ]]; then
     backup_if_exists "$BAD_BIN"
     backup_if_exists "$BAD_WRAPPER"
-
     cp -f "$BAD_SRC" "$BAD_BIN"
     cp -f "$WR_SRC"  "$BAD_WRAPPER"
     chmod 755 "$BAD_BIN" "$BAD_WRAPPER"
@@ -211,12 +193,10 @@ copy_files(){
   fi
 }
 
-# ------------ services (FIXED) ------------
+# FIX screen + systemd (sin timeout)
 write_service_pdirect(){
   local svc="$SYSTEMD_DIR/$PD_SVC"
   backup_if_exists "$svc"
-
-  # FIX: oneshot + RemainAfterExit para screen (sin timeouts)
   cat > "$svc" <<EOF
 [Unit]
 Description=El NeNe 3.0 - PDirect (${TARGET}) via screen
@@ -239,7 +219,6 @@ EOF
 write_service_proxy(){
   local svc="$SYSTEMD_DIR/$PX_SVC"
   backup_if_exists "$svc"
-
   cat > "$svc" <<EOF
 [Unit]
 Description=El NeNe 3.0 - proxy (${TARGET}) via screen
@@ -273,7 +252,6 @@ write_badvpn_env_default(){
 write_service_badvpn(){
   local svc="$SYSTEMD_DIR/$BAD_SVC"
   backup_if_exists "$svc"
-
   cat > "$svc" <<EOF
 [Unit]
 Description=El NeNe 3.0 - BadVPN UDPGW
@@ -294,15 +272,28 @@ EOF
   ok "Servicio creado: $BAD_SVC"
 }
 
-daemon_reload(){
-  systemctl daemon-reload >/dev/null 2>&1 || true
-}
+daemon_reload(){ systemctl daemon-reload >/dev/null 2>&1 || true; }
 
 enable_start(){
-  # Silenciar output (symlinks) para que no parezca que “se quedó”
   [[ "$RUN_PD" -eq 1 ]] && systemctl enable --now "$PD_SVC" >/dev/null 2>&1 || true
   [[ "$RUN_PX" -eq 1 ]] && systemctl enable --now "$PX_SVC" >/dev/null 2>&1 || true
   [[ "${RUN_BAD:-0}" -eq 1 ]] && systemctl enable --now "$BAD_SVC" >/dev/null 2>&1 || true
+  systemctl reset-failed "$PD_SVC" >/dev/null 2>&1 || true
+  systemctl reset-failed "$PX_SVC" >/dev/null 2>&1 || true
+}
+
+disable_boot(){
+  systemctl disable "$PD_SVC" >/dev/null 2>&1 || true
+  systemctl disable "$PX_SVC" >/dev/null 2>&1 || true
+  systemctl disable "$BAD_SVC" >/dev/null 2>&1 || true
+  ok "Autostart DESHABILITADO (no arranca al reinicio)."
+}
+
+enable_boot(){
+  systemctl enable "$PD_SVC" >/dev/null 2>&1 || true
+  systemctl enable "$PX_SVC" >/dev/null 2>&1 || true
+  systemctl enable "$BAD_SVC" >/dev/null 2>&1 || true
+  ok "Autostart HABILITADO (arranca al reinicio)."
 }
 
 svc_state(){ systemctl is-active --quiet "$1" && echo "ON" || echo "OFF"; }
@@ -318,30 +309,14 @@ badvpn_port_current(){
   echo "$port"
 }
 
-screen_pid(){
-  local name="$1"
-  screen -ls 2>/dev/null | awk -v n="$name" '$0 ~ n {print $1}' | head -n1 | cut -d. -f1
-}
-
-get_default_host(){
-  local f="$1"
-  [[ -f "$f" ]] || { echo "-"; return; }
-  local v
-  v="$(grep -E "^[[:space:]]*DEFAULT_HOST[[:space:]]*=" -m1 "$f" 2>/dev/null | sed -E "s/.*=[[:space:]]*'([^']+)'.*/\1/")"
-  [[ -n "$v" ]] && echo "$v" || echo "-"
-}
-
-# Detecta puertos reales escuchando para un programa/pid (usa netstat si existe, sino ss)
-ports_by_pid(){
-  local pid="$1"
-  [[ -n "$pid" ]] || { echo "-"; return; }
-
+# Puertos reales por netstat/ss
+list_listen_ports(){
   if has_cmd netstat; then
-    netstat -tnpl 2>/dev/null | awk -v p="$pid" '$0 ~ (p"/") && $6=="LISTEN" {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq | paste -sd, - || true
+    netstat -tnpl 2>/dev/null | awk '$6=="LISTEN"{print $4,$7}' || true
   elif has_cmd ss; then
-    ss -lntp 2>/dev/null | awk -v p="$pid" '$0 ~ ("pid="p",") {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq | paste -sd, - || true
+    ss -lntp 2>/dev/null | awk '{print $4,$6}' || true
   else
-    echo "-"
+    echo ""
   fi
 }
 
@@ -351,10 +326,18 @@ port_open(){
   if has_cmd netstat; then
     netstat -tnpl 2>/dev/null | awk '{print $4,$6}' | grep -qE "[:.]${port}[[:space:]]+LISTEN$" && echo "OPEN" || echo "CLOSED"
   elif has_cmd ss; then
-    ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}$" && echo "OPEN" || echo "CLOSED"
+    ss -lnt 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}$" && echo "OPEN" || echo "CLOSED"
   else
     echo "?"
   fi
+}
+
+get_default_host(){
+  local f="$1"
+  [[ -f "$f" ]] || { echo "-"; return; }
+  local v
+  v="$(grep -E "^[[:space:]]*DEFAULT_HOST[[:space:]]*=" -m1 "$f" 2>/dev/null | sed -E "s/.*=[[:space:]]*'([^']+)'.*/\1/")"
+  [[ -n "$v" ]] && echo "$v" || echo "-"
 }
 
 show_status(){
@@ -373,45 +356,110 @@ show_status(){
   echo "➡️  Destino (DEFAULT_HOST): $(get_default_host "$DEST/PDirect.py")"
   echo
 
-  local pd_pid px_pid
-  pd_pid="$(screen_pid "PDirect")"
-  px_pid="$(screen_pid "Proxy")"
-
-  # Puertos reales por PID (screen crea proceso; el python suele ser hijo, pero netstat muestra python3 PID real).
-  # Igual mostramos: si encontramos python3 escuchando, se ve en netstat.
-  local pd_ports px_ports
-  pd_ports="$(has_cmd netstat && netstat -tnpl 2>/dev/null | awk '$6=="LISTEN" && $7 ~ /python3/ {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq | paste -sd, - || echo "-")"
-  px_ports="$(has_cmd netstat && netstat -tnpl 2>/dev/null | awk '$6=="LISTEN" && $7 ~ /python3/ {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq | paste -sd, - || echo "-")"
-
-  # Mejor: si hay python3 escuchando, mostramos todos (en SSHPlus normalmente es 80).
-  echo "PDirect: $(svc_state "$PD_SVC") | $(svc_enabled "$PD_SVC") | screenPID: ${pd_pid:-"-"} | puertos python3 LISTEN: ${pd_ports:-"-"}"
-  echo "proxy:   $(svc_state "$PX_SVC") | $(svc_enabled "$PX_SVC") | screenPID: ${px_pid:-"-"} | (si proxy escucha, aparecerá en python3 LISTEN)"
+  echo "PDirect: $(svc_state "$PD_SVC") | $(svc_enabled "$PD_SVC")"
+  echo "proxy:   $(svc_state "$PX_SVC") | $(svc_enabled "$PX_SVC")"
 
   if systemctl list-unit-files 2>/dev/null | grep -q "^${BAD_SVC}"; then
-    local bad_port bad_open
-    bad_port="$(badvpn_port_current)"
-    bad_open="$(port_open "$bad_port")"
-    echo "BadVPN:  $(svc_state "$BAD_SVC") | $(svc_enabled "$BAD_SVC") | port: 127.0.0.1:${bad_port} (${bad_open})"
+    local bp
+    bp="$(badvpn_port_current)"
+    echo "BadVPN:  $(svc_state "$BAD_SVC") | $(svc_enabled "$BAD_SVC") | port: 127.0.0.1:${bp} ($(port_open "$bp"))"
   else
     echo "BadVPN:  NO INSTALADO"
   fi
+
+  echo
+  echo "📡 Puertos LISTEN actuales:"
+  list_listen_ports | head -n 20
   echo
 }
 
-install_global_cmd(){
-  cat > "$GLOBAL_CMD" <<EOF
+install_commands(){
+  cat > "$CMD1" <<EOF
 #!/usr/bin/env bash
-# Método compatible: descargar y ejecutar (evita /dev/fd y curl (23))
 rm -f /tmp/el-nene3.sh
 curl -fsSL "${RAW_BASE}/el-nene3.sh" -o /tmp/el-nene3.sh
 chmod +x /tmp/el-nene3.sh
 sudo /tmp/el-nene3.sh
 EOF
-  chmod +x "$GLOBAL_CMD"
-  ok "Comando global instalado: nene3"
+  chmod +x "$CMD1"
+  cp -f "$CMD1" "$CMD2"
+  chmod +x "$CMD2"
+  ok "Comandos instalados: pdmenu y automenu"
 }
 
-# ------------ actions ------------
+# -------- Firewall (UFW) --------
+ensure_ufw(){
+  if ! has_cmd ufw; then
+    warn "No tenés ufw. Instalando..."
+    apt-get update -y >/dev/null 2>&1 || true
+    apt-get install -y ufw >/dev/null 2>&1 || die "No pude instalar ufw."
+  fi
+}
+
+ufw_allow_common(){
+  ensure_ufw
+  ufw allow 22/tcp >/dev/null 2>&1 || true
+}
+
+ufw_allow_port(){
+  local port="$1"
+  [[ -n "$port" ]] || return 0
+  ensure_ufw
+  ufw allow "${port}/tcp" >/dev/null 2>&1 || true
+}
+
+firewall_menu(){
+  need_root
+  ensure_ufw
+  echo
+  echo "Firewall (UFW):"
+  echo "  1) Permitir SSH (22) + habilitar UFW"
+  echo "  2) Permitir puertos de PDirect/proxy (detectados en LISTEN) + habilitar UFW"
+  echo "  3) Ver estado UFW"
+  echo "  4) Deshabilitar UFW"
+  read -r -p "Opción: " f
+
+  case "$f" in
+    1)
+      ufw_allow_common
+      ufw --force enable >/dev/null 2>&1 || true
+      ok "UFW habilitado y SSH permitido."
+      ;;
+    2)
+      ufw_allow_common
+      # Permitimos TODO lo que esté LISTEN en 0.0.0.0 o ::: (excluimos 127.0.0.1)
+      local ports
+      if has_cmd netstat; then
+        ports="$(netstat -tnpl 2>/dev/null | awk '$6=="LISTEN" && ($4 ~ /^0\.0\.0\.0:/ || $4 ~ /^:::/){print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq)"
+      elif has_cmd ss; then
+        ports="$(ss -lnt 2>/dev/null | awk '$4 ~ /^0\.0\.0\.0:/ || $4 ~ /^:::/ {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq)"
+      else
+        ports=""
+      fi
+
+      for p in $ports; do
+        ufw_allow_port "$p"
+      done
+
+      ufw --force enable >/dev/null 2>&1 || true
+      ok "UFW habilitado. Puertos permitidos: $ports"
+      ;;
+    3)
+      ufw status verbose || true
+      ;;
+    4)
+      ufw disable || true
+      ok "UFW deshabilitado."
+      ;;
+    *)
+      echo "Opción inválida."
+      ;;
+  esac
+
+  press_enter
+}
+
+# -------- Actions --------
 do_install(){
   need_root
   ensure_deps
@@ -432,7 +480,7 @@ do_install(){
   daemon_reload
   enable_start
   persist_state
-  install_global_cmd
+  install_commands
 
   ok "Instalación/actualización completada."
   show_status
@@ -466,19 +514,23 @@ do_restart_all(){
   press_enter
 }
 
+# Logs: NO usamos -f por defecto (para que vuelva al menú)
 do_logs(){
   need_root
   echo
-  echo "Logs:"
+  echo "Logs (últimas líneas):"
   echo "  1) PDirect"
   echo "  2) proxy"
   echo "  3) BadVPN"
+  echo "  4) Seguir en vivo (-f) PDirect (salir con Ctrl+C)"
   read -r -p "Opción: " o
+
   case "$o" in
-    1) journalctl -u "$PD_SVC" -f ;;
-    2) journalctl -u "$PX_SVC" -f ;;
-    3) journalctl -u "$BAD_SVC" -f ;;
-    *) die "Opción inválida." ;;
+    1) journalctl -u "$PD_SVC" --no-pager -n 80 || true ; press_enter ;;
+    2) journalctl -u "$PX_SVC" --no-pager -n 80 || true ; press_enter ;;
+    3) journalctl -u "$BAD_SVC" --no-pager -n 80 || true ; press_enter ;;
+    4) journalctl -u "$PD_SVC" -f || true ; press_enter ;;
+    *) echo "Opción inválida." ; press_enter ;;
   esac
 }
 
@@ -512,7 +564,6 @@ do_uninstall(){
   press_enter
 }
 
-# ------------ menu ------------
 menu(){
   need_root
   while true; do
@@ -531,6 +582,9 @@ menu(){
     echo "[5] 📜 Ver logs"
     echo "[6] 🧨 Desinstalar servicios"
     echo "[7] 🔧 Cambiar puerto BadVPN (default 7300)"
+    echo "[8] 🛡️  Firewall UFW (permitir puertos)"
+    echo "[9] ✅ Habilitar autostart al reinicio (systemctl enable)"
+    echo "[10] ⛔ Deshabilitar autostart (systemctl disable)"
     echo "[0] Salir"
     echo
     read -r -p "Opción: " op
@@ -542,6 +596,9 @@ menu(){
       5) do_logs ;;
       6) do_uninstall ;;
       7) badvpn_set_port ;;
+      8) firewall_menu ;;
+      9) enable_boot ; press_enter ;;
+      10) disable_boot ; press_enter ;;
       0) exit 0 ;;
       *) echo "Opción inválida." ;;
     esac
