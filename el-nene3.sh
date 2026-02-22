@@ -3,17 +3,28 @@ set -euo pipefail
 
 # ==========================================================
 #  El NeNe 3.0 – Script Automatizado de Redireccionamiento
-#  - systemd + screen -DmS (como tu método manual)
-#  - NO pregunta puertos de PDirect/proxy (están dentro del .py)
-#  - BadVPN: 7300 por defecto (editable desde menú)
-#  - One-liner friendly: descarga assets desde GitHub raw
-#  - Menú muestra ON/OFF + puertos OPEN/CLOSED
+#  PDirect.py + proxy.py + BadVPN UDPGW
+#
+#  ✅ Modo "manual-compatible": systemd + screen -DmS
+#  ✅ FIX systemd: Type=oneshot + RemainAfterExit (sin timeouts)
+#  ✅ NO pregunta puertos de PDirect/proxy (se editan en el .py)
+#  ✅ BadVPN: 7300 por defecto (editable desde menú)
+#  ✅ Descarga assets desde GitHub raw (files/)
+#  ✅ Menú muestra ON/OFF + ENABLED/DISABLED + puertos OPEN/CLOSED (netstat/ss)
+#  ✅ Siempre guarda estado: /var/lib/nene3/target.conf
+#
+#  Repo esperado:
+#   el-nene3.sh
+#   files/PDirect.py
+#   files/proxy.py
+#   files/badvpn-udpgw
+#   files/antcrashvpn.sh
 # ==========================================================
 
 APP_NAME="El NeNe 3.0 – Redireccionamiento de Puertos"
 
-# Si se ejecuta por pipe (curl | bash), stdin no es TTY.
-# Forzamos lectura del teclado para que el menú funcione siempre.
+# Si se ejecuta por pipe (curl | bash) stdin puede no ser TTY.
+# Forzamos lectura del teclado si existe /dev/tty.
 if [[ ! -t 0 ]] && [[ -r /dev/tty ]]; then
   exec </dev/tty
 fi
@@ -34,7 +45,6 @@ DL_DIR="/tmp/nene3-files"
 
 SYSTEMD_DIR="/etc/systemd/system"
 
-# Services
 PD_SVC="pdirect.service"
 PX_SVC="proxy.service"
 
@@ -45,9 +55,11 @@ BAD_WRAPPER="/bin/antcrashvpn.sh"
 BAD_ENV="/etc/default/nene3-badvpn"
 BAD_DEFAULT_PORT="7300"
 
-STATE_FILE="/var/lib/nene3/target.conf"
+STATE_DIR="/var/lib/nene3"
+STATE_FILE="${STATE_DIR}/target.conf"
 GLOBAL_CMD="/usr/local/bin/nene3"
 
+# ------------ helpers ------------
 ts(){ date +"%Y%m%d%H%M%S"; }
 die(){ echo "❌ $*"; exit 1; }
 ok(){ echo "✅ $*"; }
@@ -73,14 +85,20 @@ backup_if_exists(){
   fi
 }
 
+has_cmd(){ command -v "$1" >/dev/null 2>&1; }
+
 ensure_deps(){
-  command -v python3 >/dev/null 2>&1 || die "Falta python3 (sudo apt-get update && sudo apt-get install -y python3)"
-  command -v systemctl >/dev/null 2>&1 || die "No encuentro systemctl (systemd)."
-  command -v curl >/dev/null 2>&1 || die "Falta curl (sudo apt-get install -y curl)"
-  command -v screen >/dev/null 2>&1 || die "Falta screen (sudo apt-get update && sudo apt-get install -y screen)"
-  command -v ss >/dev/null 2>&1 || warn "No encuentro 'ss' (iproute2). Para ver puertos OPEN/CLOSED instalá: apt-get install -y iproute2"
+  has_cmd python3 || die "Falta python3: sudo apt-get update && sudo apt-get install -y python3"
+  has_cmd systemctl || die "No encuentro systemctl (systemd)."
+  has_cmd curl || die "Falta curl: sudo apt-get install -y curl"
+  has_cmd screen || die "Falta screen: sudo apt-get update && sudo apt-get install -y screen"
+  # netstat suele venir de net-tools; si no está, usamos ss
+  if ! has_cmd netstat && ! has_cmd ss; then
+    warn "No encuentro netstat ni ss. Para ver puertos OPEN/CLOSED instalá: sudo apt-get install -y net-tools (o iproute2)."
+  fi
 }
 
+# ------------ target selection ------------
 pick_target(){
   echo "==============================================="
   echo " $APP_NAME"
@@ -127,8 +145,9 @@ ask_components(){
   fi
 }
 
+# ------------ state ------------
 persist_state(){
-  mkdir -p "$(dirname "$STATE_FILE")"
+  mkdir -p "$STATE_DIR"
   cat > "$STATE_FILE" <<EOF
 TARGET=${TARGET}
 DEST=${DEST}
@@ -147,6 +166,7 @@ load_state(){
   return 1
 }
 
+# ------------ downloads ------------
 download_asset(){
   local name="$1"
   local url="${RAW_BASE}/files/${name}"
@@ -166,6 +186,7 @@ ensure_assets(){
   fi
 }
 
+# ------------ install/copy ------------
 copy_files(){
   echo
   echo "📁 Destino: $DEST"
@@ -190,10 +211,12 @@ copy_files(){
   fi
 }
 
+# ------------ services (FIXED) ------------
 write_service_pdirect(){
   local svc="$SYSTEMD_DIR/$PD_SVC"
   backup_if_exists "$svc"
 
+  # FIX: oneshot + RemainAfterExit para screen (sin timeouts)
   cat > "$svc" <<EOF
 [Unit]
 Description=El NeNe 3.0 - PDirect (${TARGET}) via screen
@@ -236,33 +259,9 @@ EOF
   ok "Servicio creado: $PX_SVC"
 }
 
-write_service_proxy(){
-  local svc="$SYSTEMD_DIR/$PX_SVC"
-  backup_if_exists "$svc"
-
-  cat > "$svc" <<EOF
-[Unit]
-Description=El NeNe 3.0 - proxy (${TARGET}) via screen
-After=network.target
-
-[Service]
-Type=forking
-WorkingDirectory=${DEST}
-ExecStart=/usr/bin/screen -DmS Proxy /usr/bin/python3 ${DEST}/proxy.py
-User=root
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  ok "Servicio creado: $PX_SVC"
-}
-
 write_badvpn_env_default(){
   mkdir -p /etc/default
   if [[ -f "$BAD_ENV" ]]; then
-    # ya existe => lo respetamos
     ok "BadVPN env ya existe: $BAD_ENV (lo respeto)"
     return
   fi
@@ -300,7 +299,7 @@ daemon_reload(){
 }
 
 enable_start(){
-  # Silenciamos output (symlinks) para que no parezca que “se colgó”
+  # Silenciar output (symlinks) para que no parezca que “se quedó”
   [[ "$RUN_PD" -eq 1 ]] && systemctl enable --now "$PD_SVC" >/dev/null 2>&1 || true
   [[ "$RUN_PX" -eq 1 ]] && systemctl enable --now "$PX_SVC" >/dev/null 2>&1 || true
   [[ "${RUN_BAD:-0}" -eq 1 ]] && systemctl enable --now "$BAD_SVC" >/dev/null 2>&1 || true
@@ -319,29 +318,9 @@ badvpn_port_current(){
   echo "$port"
 }
 
-# screen session pid helper
 screen_pid(){
   local name="$1"
   screen -ls 2>/dev/null | awk -v n="$name" '$0 ~ n {print $1}' | head -n1 | cut -d. -f1
-}
-
-# Detecta puerto simple desde el código (si el script define algo tipo PORT=80, port=80, listen_port=80)
-detect_port_from_code(){
-  local f="$1"
-  [[ -f "$f" ]] || { echo "?"; return; }
-  local p
-  p="$(grep -Eoi '(listen_)?port[[:space:]]*=[[:space:]]*[0-9]{2,5}' "$f" 2>/dev/null | head -n1 | grep -Eo '[0-9]{2,5}' || true)"
-  [[ -n "$p" ]] && echo "$p" || echo "?"
-}
-
-port_state(){
-  local port="$1"
-  command -v ss >/dev/null 2>&1 || { echo "?"; return; }
-  if ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}$"; then
-    echo "OPEN"
-  else
-    echo "CLOSED"
-  fi
 }
 
 get_default_host(){
@@ -350,6 +329,32 @@ get_default_host(){
   local v
   v="$(grep -E "^[[:space:]]*DEFAULT_HOST[[:space:]]*=" -m1 "$f" 2>/dev/null | sed -E "s/.*=[[:space:]]*'([^']+)'.*/\1/")"
   [[ -n "$v" ]] && echo "$v" || echo "-"
+}
+
+# Detecta puertos reales escuchando para un programa/pid (usa netstat si existe, sino ss)
+ports_by_pid(){
+  local pid="$1"
+  [[ -n "$pid" ]] || { echo "-"; return; }
+
+  if has_cmd netstat; then
+    netstat -tnpl 2>/dev/null | awk -v p="$pid" '$0 ~ (p"/") && $6=="LISTEN" {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq | paste -sd, - || true
+  elif has_cmd ss; then
+    ss -lntp 2>/dev/null | awk -v p="$pid" '$0 ~ ("pid="p",") {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq | paste -sd, - || true
+  else
+    echo "-"
+  fi
+}
+
+port_open(){
+  local port="$1"
+  [[ -n "$port" ]] || { echo "?"; return; }
+  if has_cmd netstat; then
+    netstat -tnpl 2>/dev/null | awk '{print $4,$6}' | grep -qE "[:.]${port}[[:space:]]+LISTEN$" && echo "OPEN" || echo "CLOSED"
+  elif has_cmd ss; then
+    ss -lntp 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}$" && echo "OPEN" || echo "CLOSED"
+  else
+    echo "?"
+  fi
 }
 
 show_status(){
@@ -368,24 +373,24 @@ show_status(){
   echo "➡️  Destino (DEFAULT_HOST): $(get_default_host "$DEST/PDirect.py")"
   echo
 
-  local pd_port px_port bad_port
-  pd_port="$(detect_port_from_code "$DEST/PDirect.py")"
-  px_port="$(detect_port_from_code "$DEST/proxy.py")"
-  bad_port="$(badvpn_port_current)"
-
-  local pd_open px_open bad_open
-  pd_open="$( [[ "$pd_port" != "?" ]] && port_state "$pd_port" || echo "?" )"
-  px_open="$( [[ "$px_port" != "?" ]] && port_state "$px_port" || echo "?" )"
-  bad_open="$(port_state "$bad_port")"
-
   local pd_pid px_pid
   pd_pid="$(screen_pid "PDirect")"
   px_pid="$(screen_pid "Proxy")"
 
-  echo "PDirect: $(svc_state "$PD_SVC") | $(svc_enabled "$PD_SVC") | screenPID: ${pd_pid:-"-"} | port: ${pd_port} (${pd_open})"
-  echo "proxy:   $(svc_state "$PX_SVC") | $(svc_enabled "$PX_SVC") | screenPID: ${px_pid:-"-"} | port: ${px_port} (${px_open})"
+  # Puertos reales por PID (screen crea proceso; el python suele ser hijo, pero netstat muestra python3 PID real).
+  # Igual mostramos: si encontramos python3 escuchando, se ve en netstat.
+  local pd_ports px_ports
+  pd_ports="$(has_cmd netstat && netstat -tnpl 2>/dev/null | awk '$6=="LISTEN" && $7 ~ /python3/ {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq | paste -sd, - || echo "-")"
+  px_ports="$(has_cmd netstat && netstat -tnpl 2>/dev/null | awk '$6=="LISTEN" && $7 ~ /python3/ {print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | uniq | paste -sd, - || echo "-")"
+
+  # Mejor: si hay python3 escuchando, mostramos todos (en SSHPlus normalmente es 80).
+  echo "PDirect: $(svc_state "$PD_SVC") | $(svc_enabled "$PD_SVC") | screenPID: ${pd_pid:-"-"} | puertos python3 LISTEN: ${pd_ports:-"-"}"
+  echo "proxy:   $(svc_state "$PX_SVC") | $(svc_enabled "$PX_SVC") | screenPID: ${px_pid:-"-"} | (si proxy escucha, aparecerá en python3 LISTEN)"
 
   if systemctl list-unit-files 2>/dev/null | grep -q "^${BAD_SVC}"; then
+    local bad_port bad_open
+    bad_port="$(badvpn_port_current)"
+    bad_open="$(port_open "$bad_port")"
     echo "BadVPN:  $(svc_state "$BAD_SVC") | $(svc_enabled "$BAD_SVC") | port: 127.0.0.1:${bad_port} (${bad_open})"
   else
     echo "BadVPN:  NO INSTALADO"
@@ -396,12 +401,17 @@ show_status(){
 install_global_cmd(){
   cat > "$GLOBAL_CMD" <<EOF
 #!/usr/bin/env bash
-sudo bash <(curl -fsSL "${RAW_BASE}/el-nene3.sh")
+# Método compatible: descargar y ejecutar (evita /dev/fd y curl (23))
+rm -f /tmp/el-nene3.sh
+curl -fsSL "${RAW_BASE}/el-nene3.sh" -o /tmp/el-nene3.sh
+chmod +x /tmp/el-nene3.sh
+sudo /tmp/el-nene3.sh
 EOF
   chmod +x "$GLOBAL_CMD"
   ok "Comando global instalado: nene3"
 }
 
+# ------------ actions ------------
 do_install(){
   need_root
   ensure_deps
@@ -502,6 +512,7 @@ do_uninstall(){
   press_enter
 }
 
+# ------------ menu ------------
 menu(){
   need_root
   while true; do
