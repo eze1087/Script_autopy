@@ -3,6 +3,7 @@ set -euo pipefail
 
 APP_NAME="El NeNe 3.0 – Redireccionamiento de Puertos"
 
+# stdin por pipe => usar teclado real
 if [[ ! -t 0 ]] && [[ -r /dev/tty ]]; then
   exec </dev/tty
 fi
@@ -68,14 +69,15 @@ backup_once(){
 ensure_deps(){
   has_cmd systemctl || die "No encuentro systemctl (systemd)."
   has_cmd curl || die "Falta curl: sudo apt-get install -y curl"
-  has_cmd screen || warn "No tenés screen (SSHPLUS/VPS-MX/ADMRufu lo usan). Instalá: sudo apt-get install -y screen"
   has_cmd nano || warn "No tenés nano (para editar). Instalá: sudo apt-get install -y nano"
   if ! has_cmd python3 && ! has_cmd python; then
     die "Falta python/python3. Instalá: sudo apt-get update && sudo apt-get install -y python3"
   fi
+  has_cmd screen || warn "No tenés screen (SSHPLUS/VPS-MX/ADMRufu lo usan). Instalá: sudo apt-get install -y screen"
   if ! has_cmd netstat && ! has_cmd ss; then
     warn "No encuentro netstat ni ss. Para ver puertos: sudo apt-get install -y net-tools (o iproute2)."
   fi
+  has_cmd ufw || true
 }
 
 install_commands(){
@@ -91,7 +93,7 @@ EOF
   chmod +x "$CMD2"
 }
 
-# ---------- MAPA: DEST + TIPO DE SERVICIO ----------
+# ---------- MAPA: DEST ----------
 pick_target(){
   echo "==============================================="
   echo " $APP_NAME"
@@ -173,7 +175,7 @@ ensure_assets(){
   fi
 }
 
-# Pisa SIEMPRE (sin backups repetidos)
+# Pisa siempre (sin backups repetidos de .py)
 copy_files(){
   echo
   echo "📁 Destino (service path): $DEST"
@@ -247,7 +249,6 @@ free_ports_80_443(){
 write_services_by_target(){
   case "$TARGET" in
     SSHPLUS)
-      # Proxy (screen)
       if [[ "${RUN_PX:-0}" -eq 1 ]]; then
         local svc="$SYSTEMD_DIR/$PX_SVC"
         backup_once "$svc"
@@ -266,10 +267,8 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-        ok "Servicio proxy: $PX_SVC"
       fi
 
-      # PDirect (screen)
       if [[ "${RUN_PD:-0}" -eq 1 ]]; then
         local svc="$SYSTEMD_DIR/$PD_SVC"
         backup_once "$svc"
@@ -288,11 +287,9 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-        ok "Servicio PDirect: $PD_SVC"
       fi
       ;;
     VPS-MX)
-      # PDirect (screen + python) tal cual tu ejemplo
       if [[ "${RUN_PD:-0}" -eq 1 ]]; then
         local svc="$SYSTEMD_DIR/$PD_SVC"
         backup_once "$svc"
@@ -311,11 +308,9 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-        ok "Servicio PDirect: $PD_SVC"
       fi
       ;;
     ADMRufu)
-      # PDirect (screen + python3)
       if [[ "${RUN_PD:-0}" -eq 1 ]]; then
         local svc="$SYSTEMD_DIR/$PD_SVC"
         backup_once "$svc"
@@ -334,11 +329,9 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-        ok "Servicio PDirect: $PD_SVC"
       fi
       ;;
     VPS-AGN)
-      # PDirect (Type=simple + env python3) tal cual tu ejemplo
       if [[ "${RUN_PD:-0}" -eq 1 ]]; then
         local svc="$SYSTEMD_DIR/$PD_SVC"
         backup_once "$svc"
@@ -356,11 +349,9 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 EOF
-        ok "Servicio PDirect: $PD_SVC"
       fi
       ;;
     LATAM)
-      # PDirect (screen + python3, ruta LATAM)
       if [[ "${RUN_PD:-0}" -eq 1 ]]; then
         local svc="$SYSTEMD_DIR/$PD_SVC"
         backup_once "$svc"
@@ -379,13 +370,11 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
-        ok "Servicio PDirect: $PD_SVC"
       fi
       ;;
   esac
 }
 
-# ---- BadVPN ----
 write_badvpn_env_default(){
   mkdir -p /etc/default
   [[ -f "$BAD_ENV" ]] || echo "BADVPN_PORT=${BAD_DEFAULT_PORT}" > "$BAD_ENV"
@@ -412,7 +401,6 @@ LimitNOFILE=999999
 [Install]
 WantedBy=multi-user.target
 EOF
-  ok "Servicio BadVPN: $BAD_SVC"
 }
 
 daemon_reload(){ systemctl daemon-reload >/dev/null 2>&1 || true; }
@@ -453,7 +441,7 @@ badvpn_port_current(){
   echo "$port"
 }
 
-# ---- STATUS REAL ----
+# STATUS REAL
 is_screen_running(){
   local name="$1"
   screen -ls 2>/dev/null | grep -qE "[0-9]+\.$name" && echo "RUNNING" || echo "OFF"
@@ -500,9 +488,14 @@ show_status(){
   echo
 }
 
-# ---- LOGS MEJORADOS ----
+# LOGS: FIX DEFINITIVO (usa systemctl cat)
 unit_exists(){
-  systemctl list-unit-files 2>/dev/null | awk '{print $1}' | grep -qx "$1"
+  systemctl cat "$1" >/dev/null 2>&1
+}
+
+unit_hint(){
+  echo "👉 Para ver el unit file: systemctl cat $1"
+  echo "👉 Para ver estado:      systemctl status $1 --no-pager -l"
 }
 
 show_related_units(){
@@ -521,23 +514,38 @@ do_logs(){
 
   case "$o" in
     1)
-      if unit_exists "$PD_SVC"; then journalctl -u "$PD_SVC" --no-pager -n 80 || true
-      else echo "⚠️  No existe la unidad: $PD_SVC"; show_related_units; fi
+      if unit_exists "$PD_SVC"; then
+        journalctl -u "$PD_SVC" --no-pager -n 80 || true
+      else
+        echo "⚠️  No existe la unidad (systemd): $PD_SVC"
+        show_related_units
+        unit_hint "$PD_SVC" || true
+      fi
       ;;
     2)
-      if unit_exists "$PX_SVC"; then journalctl -u "$PX_SVC" --no-pager -n 80 || true
-      else echo "⚠️  No existe la unidad: $PX_SVC"; show_related_units; fi
+      if unit_exists "$PX_SVC"; then
+        journalctl -u "$PX_SVC" --no-pager -n 80 || true
+      else
+        echo "⚠️  No existe la unidad (systemd): $PX_SVC"
+        show_related_units
+        unit_hint "$PX_SVC" || true
+      fi
       ;;
     3)
-      if unit_exists "$BAD_SVC"; then journalctl -u "$BAD_SVC" --no-pager -n 80 || true
-      else echo "⚠️  No existe la unidad: $BAD_SVC"; show_related_units; fi
+      if unit_exists "$BAD_SVC"; then
+        journalctl -u "$BAD_SVC" --no-pager -n 80 || true
+      else
+        echo "⚠️  No existe la unidad (systemd): $BAD_SVC"
+        show_related_units
+        unit_hint "$BAD_SVC" || true
+      fi
       ;;
     4) show_related_units ;;
     *) echo "Opción inválida." ;;
   esac
 }
 
-# ---- editar manual ----
+# Edit manual
 ensure_dest_from_state(){
   if ! load_state; then
     warn "No hay instalación registrada. Elegí sistema para saber la ruta."
@@ -565,7 +573,7 @@ edit_menu(){
   esac
 }
 
-# ---- Firewall UFW ----
+# Firewall UFW
 ensure_ufw(){
   if ! has_cmd ufw; then
     warn "No tenés ufw. Instalando..."
@@ -605,7 +613,7 @@ firewall_menu(){
   esac
 }
 
-# ---- Reiniciar SSH/DROPBEAR ----
+# Reiniciar SSH/DROPBEAR
 restart_ssh_dropbear(){
   need_root
   echo
@@ -616,7 +624,7 @@ restart_ssh_dropbear(){
   ok "SSH/DROPBEAR reiniciados."
 }
 
-# ---- acciones ----
+# Acciones
 do_install(){
   need_root
   ensure_deps
